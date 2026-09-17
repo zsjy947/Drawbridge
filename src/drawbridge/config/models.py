@@ -566,6 +566,7 @@ class AppConfig(StrictModel):
 class AppsConfigFile(StrictModel):
     schema_version: Literal[1]
     apps: dict[str, AppConfig]
+    build_profiles: dict[str, BuildProfileConfig] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check(self) -> AppsConfigFile:
@@ -746,7 +747,19 @@ class MainConfig(StrictModel):
     server: ServerConfig
     paths: PathsConfig = Field(default_factory=PathsConfig)
     toolchain: ToolchainConfig = Field(default_factory=ToolchainConfig)
-    profile_env: dict[ExecutionProfile, ProfileEnvConfig] = Field(default_factory=dict)
+    profile_env: dict[ExecutionProfile, ProfileEnvConfig] = Field(
+        default_factory=dict
+    )
+
+    @field_validator("profile_env", mode="before")
+    @classmethod
+    def _coerce_profile_keys(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                (ExecutionProfile(k) if isinstance(k, str) else k): v
+                for k, v in value.items()
+            }
+        return value
     concurrency: ConcurrencyConfig = Field(default_factory=ConcurrencyConfig)
     diagnostics: DiagnosticsRuntimeConfig = Field(default_factory=DiagnosticsRuntimeConfig)
     output: OutputLimitsConfig = Field(default_factory=OutputLimitsConfig)

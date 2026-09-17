@@ -1,0 +1,203 @@
+# Drawbridge operation catalog (admin-maintained, MVP spec §4–§6).
+# executable entries reference the toolchain; argv templates allow a single
+# placeholder per element from param./app./job./release. contexts.
+schema_version: 1
+
+operations:
+  # ---------------- public reads (diagnostic channel) ----------------
+  git_status:
+    executable: git
+    argv_prefix: git_safe
+    argv: ["status", "--porcelain=v1", "--untracked-files=no"]
+    cwd_from: app.repo_path
+    execution_profile: source_manage
+    public: true
+    access: read
+    timeout_seconds: 10
+    output: {policy: terminate, max_bytes: 65536}
+
+  git_log:
+    executable: git
+    argv_prefix: git_safe
+    argv: ["log", "--no-show-signature", "--format=%H%x09%ct%x09%s",
+           "--max-count={param.count}", "{param.git_ref}", "--"]
+    parameters:
+      git_ref:
+        type: string
+        min_length: 1
+        max_length: 200
+        pattern: 'refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*|refs/tags/[A-Za-z0-9][A-Za-z0-9._/-]*|[0-9a-f]{40}'
+        validators: [allowed_app_ref, git_ref_or_commit]
+      count: {type: integer, default: 20, minimum: 1, maximum: 100}
+    cwd_from: app.repo_path
+    execution_profile: source_manage
+    public: true
+    access: read
+    timeout_seconds: 10
+    output: {policy: terminate, max_bytes: 65536}
+
+  process_list:
+    executable: ps
+    argv: ["-eo", "pid,ppid,user,comm,pcpu,pmem", "--sort=-pcpu"]
+    cwd_from: root
+    execution_profile: host_observe
+    public: true
+    access: read
+    timeout_seconds: 10
+    output: {policy: terminate, max_bytes: 65536}
+
+  npu_status:
+    handler: npu_status
+    execution_profile: host_observe
+    public: true
+    access: read
+    timeout_seconds: 10
+
+  compose_status:
+    handler: compose_status
+    execution_profile: runtime_manage
+    public: true
+    access: read
+    timeout_seconds: 15
+
+  compose_logs:
+    handler: compose_logs
+    execution_profile: runtime_manage
+    public: true
+    access: read
+    timeout_seconds: 15
+    parameters:
+      service:
+        type: string
+        max_length: 64
+        pattern: '[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}'
+        validators: [registered_service]
+      tail: {type: integer, default: 200, minimum: 1, maximum: 1000}
+      since_seconds: {type: integer, default: 300, minimum: 1, maximum: 86400}
+      limit: {type: integer, default: 100, minimum: 1, maximum: 200}
+      query:
+        type: string
+        default: ""
+        max_length: 128
+
+  config_read:
+    handler: config_read
+    execution_profile: project_diagnostic
+    public: true
+    access: read
+    timeout_seconds: 10
+    parameters:
+      file:
+        type: string
+        max_length: 64
+        validators: [registered_file_alias]
+
+  project_list:
+    handler: project_list
+    execution_profile: project_diagnostic
+    public: true
+    access: read
+    timeout_seconds: 10
+    parameters:
+      subdir:
+        type: string
+        default: "."
+        max_length: 200
+        validators: [registered_subdir]
+
+  # ---------------- public write ----------------
+  service_restart:
+    handler: service_restart_and_verify
+    execution_profile: runtime_manage
+    public: true
+    access: runtime_write
+    lock: app_environment
+    timeout_seconds: 120
+    parameters:
+      service:
+        type: string
+        max_length: 64
+        pattern: '[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}'
+        validators: [registered_restartable_service]
+      reason: {type: string, min_length: 1, max_length: 256}
+
+  # ---------------- internal (workflow engine only) ----------------
+  release_preflight:
+    handler: release_preflight
+    execution_profile: runtime_manage
+    public: false
+    access: read
+    timeout_seconds: 15
+
+  source_snapshot:
+    handler: source_snapshot
+    execution_profile: source_manage
+    public: false
+    access: read
+    timeout_seconds: 30
+
+  image_build:
+    handler: image_build
+    execution_profile: image_build
+    public: false
+    access: runtime_write
+    timeout_seconds: 900
+    output: {policy: spool, max_bytes: 65536}
+
+  image_import:
+    handler: image_import
+    execution_profile: runtime_manage
+    public: false
+    access: runtime_write
+    timeout_seconds: 120
+
+  image_identify:
+    handler: image_identify
+    execution_profile: runtime_manage
+    public: false
+    access: read
+    timeout_seconds: 10
+
+  compose_deploy:
+    handler: compose_deploy
+    execution_profile: runtime_manage
+    public: false
+    access: runtime_write
+    lock: app_environment
+    timeout_seconds: 120
+    output: {policy: spool, max_bytes: 65536}
+
+  health_check:
+    handler: health_check
+    execution_profile: runtime_manage
+    public: false
+    access: read
+    timeout_seconds: 90
+
+  test_suite:
+    handler: test_suite
+    execution_profile: isolated_test
+    public: false
+    access: runtime_write
+    timeout_seconds: 300
+
+  release_finalize:
+    handler: release_finalize
+    execution_profile: runtime_manage
+    public: false
+    access: read
+    timeout_seconds: 15
+
+  stop_initial:
+    handler: stop_initial
+    execution_profile: runtime_manage
+    public: false
+    access: runtime_write
+    timeout_seconds: 30
+
+  restore_previous:
+    handler: restore_previous
+    execution_profile: runtime_manage
+    public: false
+    access: runtime_write
+    timeout_seconds: 300

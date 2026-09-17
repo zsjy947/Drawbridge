@@ -1,0 +1,6 @@
+{
+  "name": "demo",
+  "listen_port": 8080,
+  "log_level": "info",
+  "admin_token": "not-a-real-secret"
+}

@@ -1,0 +1,24 @@
+# Drawbridge workflow templates (admin-maintained).
+# The first version ships only deploy_verify; tests and rollback are built-in
+# job handlers.  Steps may only reference internal operations.
+schema_version: 1
+
+workflows:
+  deploy_verify:
+    requires_plan: true
+    lock: app_environment
+    timeout_seconds: 1800
+    recovery_timeout_seconds: 300
+    steps:
+      - {id: preflight, operation: release_preflight}
+      - {id: source, operation: source_snapshot}
+      - {id: build, operation: image_build}
+      - {id: import, operation: image_import}
+      - {id: identify, operation: image_identify}
+      - {id: deploy, operation: compose_deploy}
+      - {id: health, operation: health_check}
+      - {id: test, operation: test_suite, parameters: {suite: smoke}}
+      - {id: finalize, operation: release_finalize}
+    on_failure:
+      before_runtime_change: stop
+      after_runtime_change: restore_previous_release

@@ -1,0 +1,76 @@
+# Drawbridge application registry (admin-maintained).
+# Compose files and shell scripts live OUTSIDE the business repository.
+schema_version: 1
+
+apps:
+  demo:
+    git:
+      repo_path: /srv/drawbridge/repos/demo
+      origin: /srv/drawbridge/origin/demo.git   # local mirror; or ssh/https URL
+      allowed_ref_patterns:
+        - '^refs/heads/main$'
+        - '^refs/heads/agent/[A-Za-z0-9_-]+$'
+      tags_enabled: false
+    npu:
+      enabled: false
+      # To enable, register the exact read-only tool for the actual NPU model
+      # (verified on the target server; wildcards are rejected):
+      # vendor: huawei
+      # model: "910B"
+      # driver: "23.0"
+      # executable: /usr/local/bin/npu-smi
+      # argv: ["info"]
+    environments:
+      staging:
+        runtime: compose
+        project_name: drawbridge-demo-staging
+        build_profile: demo
+        buildkit_socket: /run/drawbridge/buildkit/buildkitd.sock
+        deploy_root: /srv/drawbridge/apps/demo/staging
+        compose_file: /etc/drawbridge/compose/demo.staging.yaml
+        health_checks:
+          - type: http
+            url: http://127.0.0.1:18080/healthz
+            expected_status: 200
+            timeout_seconds: 90
+            single_timeout_seconds: 3
+            interval_seconds: 2
+            consecutive_successes: 3
+        services: [api]
+        restartable_services: [api]
+        test_suites: [smoke]
+        test_runner:
+          smoke:
+            image_id: sha256:REPLACE_WITH_FROZEN_TEST_IMAGE_ID
+            entrypoint: /opt/drawbridge/suites/demo/smoke
+            timeout_seconds: 300
+            network: drawbridge-demo-test
+            resources:
+              cpus: "1"
+              memory: 512m
+              pids_limit: 128
+        diagnostics:
+          root: /srv/drawbridge/apps/demo/staging/current
+          config_files:
+            app_config:
+              path: config/app.json
+              raw: false
+              fields: [name, listen_port, log_level]
+              sensitive_fields: [admin_token]
+          validators:
+            json_syntax:
+              executable: /usr/bin/python3
+              argv: ["-m", "json.tool"]
+              timeout_seconds: 15
+        retention:
+          successful_releases: 5
+          job_logs_days: 7
+        disk_budget_bytes: 10737418240    # 10 GiB, includes images + cache
+
+build_profiles:
+  demo:
+    context: .
+    dockerfile_basename: Dockerfile
+    platform: linux/arm64               # 910B server is aarch64
+    timeout_seconds: 900
+    max_parallel: 1

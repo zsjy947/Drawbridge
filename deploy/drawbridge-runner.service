@@ -1,0 +1,45 @@
+# drawbridge-runner systemd unit (install to /etc/systemd/system/).
+# The Runner is the only principal with Docker socket and repository access.
+# Keep it out of the `docker` group only if the socket path differs; the
+# unit below assumes access to /var/run/docker.sock via group membership of
+# the drawbridge-runner user (verify with `systemd-analyze security`).
+[Unit]
+Description=Drawbridge Runner (deployment principal)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=drawbridge-runner
+Group=drawbridge
+ExecStart=/opt/drawbridge/venv/bin/drawbridge-runner --config-dir /etc/drawbridge
+Restart=on-failure
+RestartSec=3
+# A crashed Runner must be inspected before any retry touches containers:
+# on repeated failure, stop and page the operator instead of looping.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# ---- hardening (shared baseline) ----
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+ProtectSystem=strict
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# Runner-specific: state, deploy roots, registered repos, build + logs;
+# AF_UNIX for the Docker/BuildKit sockets, INET for git fetch egress.
+ReadWritePaths=/var/lib/drawbridge /srv/drawbridge /var/log/drawbridge /run/drawbridge
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# NPU device access for npu_status would need PrivateDevices=false plus a
+# DeviceAllow list; leave disabled until an NPU operation is registered.
+PrivateDevices=false
+DeviceAllow=char-uart rw
+
+[Install]
+WantedBy=multi-user.target

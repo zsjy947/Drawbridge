@@ -34,4 +34,20 @@ uv run mypy
 | `drawbridge-runner`  | 唯一的执行主体：操作白名单、流程模板、隔离构建/测试、恢复 |
 | SQLite | 同机状态库：plans/jobs/steps/releases/artifacts/idempotency/events |
 
-状态：开发中。当前实现进度见 `plans/MVP_IMPLEMENTATION_SPEC.md` §10。
+## 文档
+
+- [部署手册（910B）](docs/DEPLOYMENT.md) — 账号、目录、systemd、自检、客户端接入
+- [运维手册](docs/OPERATIONS.md) — 维护模式、错误码处置、reconcile、清理、审计
+- [执行 Profile 与 BuildKit](docs/PROFILES.md) — 低权限账号映射与 rootless 构建接入
+- 示例配置：[configs/](configs/)；示例应用：[examples/demo-app/](examples/demo-app/)
+
+## 状态
+
+开发中，按 `plans/MVP_IMPLEMENTATION_SPEC.md` §10 顺序推进：
+
+1. ✅ 配置编译器与受控执行器（严格类型、fullmatch、argv/环境、输出预算、进程组收尾）
+2. ✅ SQLite 任务/幂等/队列/锁/维护 + MCP HTTP 网关（IP 白名单、token、Origin/Host）
+3. ✅ Git plan（ref 解析/可达性/安全快照）与 deploy_verify 编排（恢复语义）
+4. 🔶 Compose/构建/测试在目标服务器落地：handler 已实现（Linux 才可运行），
+   systemd 单元、自检与示例应用已提供，需在 910B 上完成真实验收
+

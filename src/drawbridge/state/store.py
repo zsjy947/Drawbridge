@@ -1,0 +1,681 @@
+"""State store: admission, claiming, releases, events.
+
+Concurrency invariants (tech design §7 / MVP spec §7-§8):
+
+* admission (idempotency dedup → plan-job uniqueness → capacity → cooldown
+  → insert) happens inside ONE short ``BEGIN IMMEDIATE`` transaction, so
+  concurrent entries can never exceed the queue or create two jobs;
+* ``UNIQUE(plan_id)`` makes "one deploy job per plan" a database property;
+* ``UNIQUE(idempotency_key)`` keeps every entry point deduplicated;
+* claiming flips ``queued → running`` conditionally in a short transaction
+  and records the owner; heartbeats are diagnostic, never a lease;
+* cooldown is checked both at admission and again at dispatch.
+"""
+
+from __future__ import annotations
+
+import time
+import uuid
+from collections.abc import Sequence
+from typing import Any
+
+from drawbridge.errors import (
+    BusyError,
+    DrawbridgeError,
+    ErrorCode,
+    IdempotencyConflictError,
+    RateLimitedError,
+    UnknownJobError,
+    UnknownPlanError,
+)
+from drawbridge.state.db import Database
+from drawbridge.state.records import (
+    ArtifactRecord,
+    JobKind,
+    JobRecord,
+    JobStatus,
+    PlanRecord,
+    ReleaseRecord,
+    StepRecord,
+    dumps,
+    loads,
+    row_to_job,
+    row_to_plan,
+    row_to_release,
+)
+
+TERMINAL_DEPLOY_KINDS = (JobKind.DEPLOY, JobKind.ROLLBACK)
+
+
+def new_id() -> str:
+    return str(uuid.uuid4())
+
+
+def request_digest(action: str, params: dict[str, Any]) -> str:
+    """Stable digest binding an idempotency key to normalized request content.
+
+    Tracing fields (agent_id / parent_task_id / request_id) must not be part
+    of the digest (MVP spec §7) — callers pass only action + normalized
+    parameters.
+    """
+    import hashlib
+
+    payload = dumps({"action": action, "params": params})
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class Store:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    # ------------------------------------------------------------------
+    # Plans
+    # ------------------------------------------------------------------
+
+    async def create_plan(
+        self,
+        *,
+        app: str,
+        environment: str,
+        workflow: str,
+        source_mode: str,
+        git_ref: str,
+        commit_sha: str | None,
+        config_digest: str,
+        baseline_release_id: str | None,
+        ttl_seconds: float,
+        params: dict[str, Any],
+        request_id: str | None = None,
+    ) -> PlanRecord:
+        now = time.time()
+        record = PlanRecord(
+            plan_id=new_id(),
+            app=app,
+            environment=environment,
+            workflow=workflow,
+            source_mode=source_mode,
+            git_ref=git_ref,
+            commit_sha=commit_sha,
+            config_digest=config_digest,
+            baseline_release_id=baseline_release_id,
+            status="planned",
+            created_at=now,
+            expires_at=now + ttl_seconds,
+            params=params,
+            request_id=request_id,
+        )
+        async with self.db.write_lock():
+            await self.db.conn.execute(
+                "INSERT INTO plans(plan_id, app, environment, workflow, source_mode,"
+                " git_ref, commit_sha, config_digest, baseline_release_id, status,"
+                " created_at, expires_at, params_json, request_id)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    record.plan_id,
+                    record.app,
+                    record.environment,
+                    record.workflow,
+                    record.source_mode,
+                    record.git_ref,
+                    record.commit_sha,
+                    record.config_digest,
+                    record.baseline_release_id,
+                    record.status,
+                    record.created_at,
+                    record.expires_at,
+                    dumps(record.params),
+                    record.request_id,
+                ),
+            )
+            await self.db.conn.commit()
+        return record
+
+    async def get_plan(self, plan_id: str) -> PlanRecord:
+        async with self.db.conn.execute(
+            "SELECT * FROM plans WHERE plan_id = ?", (plan_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise UnknownPlanError(f"plan {plan_id} does not exist")
+        return row_to_plan(row)
+
+    async def mark_plan(self, plan_id: str, status: str) -> None:
+        async with self.db.write_lock():
+            await self.db.conn.execute(
+                "UPDATE plans SET status = ? WHERE plan_id = ?", (status, plan_id)
+            )
+            await self.db.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Job admission — one short BEGIN IMMEDIATE transaction
+    # ------------------------------------------------------------------
+
+    async def admit_job(
+        self,
+        *,
+        kind: str,
+        action: str,
+        app: str,
+        environment: str,
+        params: dict[str, Any],
+        idempotency_key: str | None,
+        config_digest: str,
+        queue_timeout_seconds: float,
+        deadline_seconds: float,
+        max_queued: int,
+        max_queued_per_target: int,
+        cooldown_seconds: float = 0.0,
+        plan_id: str | None = None,
+        request_id: str | None = None,
+        agent_id: str | None = None,
+        parent_task_id: str | None = None,
+    ) -> JobRecord:
+        now = time.time()
+        digest = request_digest(action, params)
+        conn = self.db.conn
+        async with self.db.write_lock():
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = await self._find_duplicate(
+                    conn, idempotency_key, digest, plan_id
+                )
+                if existing is not None:
+                    await conn.rollback()
+                    return existing
+
+                if kind != JobKind.DIAGNOSTIC:
+                    await self._check_capacity(
+                        conn, app, environment, max_queued, max_queued_per_target
+                    )
+                    if kind in TERMINAL_DEPLOY_KINDS and cooldown_seconds > 0:
+                        await self._check_cooldown(
+                            conn, app, environment, cooldown_seconds, now
+                        )
+
+                job_id = new_id()
+                cursor = await conn.execute(
+                    "INSERT INTO jobs(job_id, kind, action, app, environment, plan_id,"
+                    " status, params_json, config_digest, queue_expires_at,"
+                    " deadline_at, queued_at, request_id, agent_id, parent_task_id)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        job_id,
+                        kind,
+                        action,
+                        app,
+                        environment,
+                        plan_id,
+                        JobStatus.QUEUED,
+                        dumps(params),
+                        config_digest,
+                        now + queue_timeout_seconds,
+                        now + queue_timeout_seconds + deadline_seconds,
+                        now,
+                        request_id,
+                        agent_id,
+                        parent_task_id,
+                    ),
+                )
+                assert cursor.rowcount == 1
+                if idempotency_key is not None:
+                    await conn.execute(
+                        "INSERT INTO idempotency_keys(key, action, app, environment,"
+                        " request_digest, job_id, created_at) VALUES(?,?,?,?,?,?,?)",
+                        (
+                            idempotency_key,
+                            action,
+                            app,
+                            environment,
+                            digest,
+                            job_id,
+                            now,
+                        ),
+                    )
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+        return await self.get_job(job_id)
+
+    async def _find_duplicate(
+        self,
+        conn: Any,
+        idempotency_key: str | None,
+        digest: str,
+        plan_id: str | None,
+    ) -> JobRecord | None:
+        if idempotency_key is not None:
+            async with conn.execute(
+                "SELECT request_digest, job_id FROM idempotency_keys WHERE key = ?",
+                (idempotency_key,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is not None:
+                if row["request_digest"] != digest:
+                    raise IdempotencyConflictError(
+                        "idempotency key was already used with different request content"
+                    )
+                return await self._job_by_id_in_conn(conn, row["job_id"])
+        if plan_id is not None:
+            async with conn.execute(
+                "SELECT job_id FROM jobs WHERE plan_id = ?", (plan_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is not None:
+                return await self._job_by_id_in_conn(conn, row["job_id"])
+        return None
+
+    async def _check_capacity(
+        self,
+        conn: Any,
+        app: str,
+        environment: str,
+        max_queued: int,
+        max_queued_per_target: int,
+    ) -> None:
+        async with conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE status = ?", (JobStatus.QUEUED,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row["n"] >= max_queued:
+            raise BusyError("mutation queue is full", retry_after_seconds=5)
+        async with conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE status = ? AND app = ?"
+            " AND environment = ?",
+            (JobStatus.QUEUED, app, environment),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row["n"] >= max_queued_per_target:
+            raise BusyError(
+                f"queue is full for target {app}/{environment}",
+                retry_after_seconds=5,
+            )
+
+    async def _check_cooldown(
+        self,
+        conn: Any,
+        app: str,
+        environment: str,
+        cooldown_seconds: float,
+        now: float,
+    ) -> None:
+        placeholders = ",".join("?" * len(TERMINAL_DEPLOY_KINDS))
+        query = (
+            "SELECT MAX(finished_at) AS last_finished FROM jobs WHERE app = ?"  # noqa: S608
+            " AND environment = ? AND kind IN (" + placeholders + ")"
+            " AND finished_at IS NOT NULL"
+        )  # placeholders expand to "?" marks only — never user input
+        async with conn.execute(
+            query,
+            (app, environment, *TERMINAL_DEPLOY_KINDS),
+        ) as cursor:
+            row = await cursor.fetchone()
+        last = row["last_finished"]
+        if last is not None and now - last < cooldown_seconds:
+            retry_after = max(1, int(cooldown_seconds - (now - last)) + 1)
+            raise RateLimitedError(
+                "deploy cooldown has not elapsed",
+                retry_after_seconds=retry_after,
+            )
+
+    async def _job_by_id_in_conn(self, conn: Any, job_id: str) -> JobRecord:
+        async with conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        return row_to_job(row)
+
+    # ------------------------------------------------------------------
+    # Job claiming / progress
+    # ------------------------------------------------------------------
+
+    async def claim_next_job(
+        self,
+        *,
+        owner: str,
+        kinds: Sequence[str],
+        now: float | None = None,
+        skip_targets: dict[str, float] | None = None,
+    ) -> JobRecord | None:
+        """Claim the oldest dispatchable queued job (FIFO per target).
+
+        ``skip_targets`` maps ``app/environment`` to a wall-clock time before
+        which the target's deploy cooldown has not elapsed — such jobs stay
+        queued without occupying a run slot (spec §7).
+        """
+        now = time.time() if now is None else now
+        conn = self.db.conn
+        placeholders = ",".join("?" * len(kinds))
+        skip_targets = skip_targets or {}
+        async with self.db.write_lock():
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                query = (
+                    "SELECT * FROM jobs WHERE status = ? AND kind IN ("  # noqa: S608
+                    + placeholders + ") ORDER BY queued_at"
+                )
+                async with conn.execute(
+                    query,
+                    (JobStatus.QUEUED, *kinds),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                claimed: JobRecord | None = None
+                for row in rows:
+                    job = row_to_job(row)
+                    if job.queue_expires_at is not None and job.queue_expires_at <= now:
+                        await conn.execute(
+                            "UPDATE jobs SET status = ?, finished_at = ?"
+                            " WHERE job_id = ? AND status = ?",
+                            (JobStatus.QUEUE_EXPIRED, now, job.job_id, JobStatus.QUEUED),
+                        )
+                        continue
+                    target = f"{job.app}/{job.environment}"
+                    if job.kind in TERMINAL_DEPLOY_KINDS:
+                        until = skip_targets.get(target)
+                        if until is not None and now < until:
+                            continue
+                    await conn.execute(
+                        "UPDATE jobs SET status = ?, owner = ?, started_at = ?,"
+                        " heartbeat_at = ?, deadline_at = ?"
+                        " WHERE job_id = ? AND status = ?",
+                        (
+                            JobStatus.RUNNING,
+                            owner,
+                            now,
+                            now,
+                            job.deadline_at,
+                            job.job_id,
+                            JobStatus.QUEUED,
+                        ),
+                    )
+                    if cursor.rowcount == -1 and conn.total_changes < 0:  # pragma: no cover
+                        continue
+                    claimed = await self._job_by_id_in_conn(conn, job.job_id)
+                    if claimed.status != JobStatus.RUNNING:  # pragma: no cover
+                        claimed = None
+                        continue
+                    break
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+        return claimed
+
+    async def get_job(self, job_id: str) -> JobRecord:
+        async with self.db.conn.execute(
+            "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise UnknownJobError(f"job {job_id} does not exist")
+        return row_to_job(row)
+
+    async def find_job_by_plan(self, plan_id: str) -> JobRecord | None:
+        async with self.db.conn.execute(
+            "SELECT * FROM jobs WHERE plan_id = ?", (plan_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row_to_job(row) if row is not None else None
+
+    async def find_active_job(
+        self, app: str, environment: str
+    ) -> dict[str, Any] | None:
+        async with self.db.conn.execute(
+            "SELECT * FROM jobs WHERE app = ? AND environment = ?"
+            " AND status IN ('queued', 'running') ORDER BY queued_at LIMIT 1",
+            (app, environment),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row_to_job(row).to_public_dict() if row is not None else None
+
+    async def heartbeat(self, job_id: str, owner: str, *, now: float | None = None) -> None:
+        now = now if now is not None else time.time()
+        async with self.db.write_lock():
+            await self.db.conn.execute(
+                "UPDATE jobs SET heartbeat_at = ? WHERE job_id = ? AND owner = ?",
+                (now, job_id, owner),
+            )
+            await self.db.conn.commit()
+
+    async def mark_runtime_change_started(self, job_id: str) -> None:
+        async with self.db.write_lock():
+            await self.db.conn.execute(
+                "UPDATE jobs SET runtime_change_started = 1 WHERE job_id = ?",
+                (job_id,),
+            )
+            await self.db.conn.commit()
+
+    async def finish_job(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+        recovery: dict[str, Any] | None = None,
+        owner: str | None = None,
+    ) -> None:
+        if status not in JobStatus.TERMINAL:
+            raise DrawbridgeError(
+                f"cannot finish job into non-terminal status {status!r}",
+                code=ErrorCode.INTERNAL,
+            )
+        now = time.time()
+        async with self.db.write_lock():
+            if owner is not None:
+                await self.db.conn.execute(
+                    "UPDATE jobs SET status = ?, result_json = ?, recovery_json = ?,"
+                    " finished_at = ? WHERE job_id = ? AND owner = ?",
+                    (status, dumps(result) if result else None,
+                     dumps(recovery) if recovery else None, now, job_id, owner),
+                )
+            else:
+                await self.db.conn.execute(
+                    "UPDATE jobs SET status = ?, result_json = ?, recovery_json = ?,"
+                    " finished_at = ? WHERE job_id = ?",
+                    (status, dumps(result) if result else None,
+                     dumps(recovery) if recovery else None, now, job_id),
+                )
+            await self.db.conn.commit()
+
+    async def expire_stale_queue(self) -> int:
+        """Queue timeouts run on their own clock; returns expired count."""
+        now = time.time()
+        async with self.db.write_lock():
+            cursor = await self.db.conn.execute(
+                "UPDATE jobs SET status = ?, finished_at = ?"
+                " WHERE status = ? AND queue_expires_at IS NOT NULL"
+                " AND queue_expires_at <= ?",
+                (JobStatus.QUEUE_EXPIRED, now, JobStatus.QUEUED, now),
+            )
+            count = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+            await self.db.conn.commit()
+        return count
+
+    # ------------------------------------------------------------------
+    # Steps
+    # ------------------------------------------------------------------
+
+    async def start_step(self, job_id: str, seq: int, name: str) -> str:
+        step_id = new_id()
+        async with self.db.write_lock():
+            await self.db.conn.execute(
+                "INSERT INTO steps(step_id, job_id, seq, name, status, started_at)"
+                " VALUES(?,?,?,?,?,?)",
+                (step_id, job_id, seq, name, "running", time.time()),
+            )
+            await self.db.conn.commit()
+        return step_id
+
+    async def finish_step(
+        self,
+        step_id: str,
+        *,
+        status: str,
+        exit_code: int | None = None,
+        termination_reason: str | None = None,
+        log_ref: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        async with self.db.write_lock():
+            await self.db.conn.execute(
+                "UPDATE steps SET status = ?, finished_at = ?, exit_code = ?,"
+                " termination_reason = ?, log_ref = ?, detail_json = ?"
+                " WHERE step_id = ?",
+                (
+                    status,
+                    time.time(),
+                    exit_code,
+                    termination_reason,
+                    log_ref,
+                    dumps(detail) if detail else None,
+                    step_id,
+                ),
+            )
+            await self.db.conn.commit()
+
+    async def list_steps(self, job_id: str) -> list[StepRecord]:
+        async with self.db.conn.execute(
+            "SELECT * FROM steps WHERE job_id = ? ORDER BY seq", (job_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            StepRecord(
+                step_id=r["step_id"],
+                job_id=r["job_id"],
+                seq=r["seq"],
+                name=r["name"],
+                status=r["status"],
+                started_at=r["started_at"],
+                finished_at=r["finished_at"],
+                exit_code=r["exit_code"],
+                termination_reason=r["termination_reason"],
+                log_ref=r["log_ref"],
+                detail=loads(r["detail_json"]) or {},
+            )
+            for r in rows
+        ]
+
+    # ------------------------------------------------------------------
+    # Releases and artifacts
+    # ------------------------------------------------------------------
+
+    async def record_release(self, record: ReleaseRecord) -> None:
+        async with self.db.write_lock():
+            await self.db.conn.execute(
+                "UPDATE releases SET status = ? WHERE app = ? AND environment = ?"
+                " AND status IN (?, ?)",
+                ("superseded", record.app, record.environment, "succeeded", "rollback"),
+            )
+            await self.db.conn.execute(
+                "INSERT INTO releases(release_id, app, environment, plan_id, job_id,"
+                " commit_sha, image_id, image_tag, config_digest, status, rollback_of,"
+                " compose_path, deploy_dir, evidence_json, created_at, verified_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    record.release_id,
+                    record.app,
+                    record.environment,
+                    record.plan_id,
+                    record.job_id,
+                    record.commit_sha,
+                    record.image_id,
+                    record.image_tag,
+                    record.config_digest,
+                    record.status,
+                    record.rollback_of,
+                    record.compose_path,
+                    record.deploy_dir,
+                    dumps(record.evidence),
+                    record.created_at,
+                    record.verified_at,
+                ),
+            )
+            await self.db.conn.commit()
+
+    async def get_release(self, release_id: str) -> ReleaseRecord:
+        async with self.db.conn.execute(
+            "SELECT * FROM releases WHERE release_id = ?", (release_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            from drawbridge.errors import UnknownReleaseError
+
+            raise UnknownReleaseError(f"release {release_id} does not exist")
+        return row_to_release(row)
+
+    async def get_current_release(
+        self, app: str, environment: str
+    ) -> ReleaseRecord | None:
+        async with self.db.conn.execute(
+            "SELECT * FROM releases WHERE app = ? AND environment = ?"
+            " AND status IN ('succeeded', 'rollback')"
+            " ORDER BY created_at DESC LIMIT 1",
+            (app, environment),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row_to_release(row) if row is not None else None
+
+    async def list_releases(
+        self, app: str, environment: str, limit: int = 20
+    ) -> list[ReleaseRecord]:
+        async with self.db.conn.execute(
+            "SELECT * FROM releases WHERE app = ? AND environment = ?"
+            " ORDER BY created_at DESC LIMIT ?",
+            (app, environment, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [row_to_release(r) for r in rows]
+
+    async def record_artifact(self, record: ArtifactRecord) -> None:
+        async with self.db.write_lock():
+            await self.db.conn.execute(
+                "INSERT INTO artifacts(artifact_id, app, environment, kind, ref,"
+                " release_id, size_bytes, sha256, created_at, retention_class)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    record.artifact_id,
+                    record.app,
+                    record.environment,
+                    record.kind,
+                    record.ref,
+                    record.release_id,
+                    record.size_bytes,
+                    record.sha256,
+                    record.created_at,
+                    record.retention_class,
+                ),
+            )
+            await self.db.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Events
+    # ------------------------------------------------------------------
+
+    async def append_event(
+        self,
+        kind: str,
+        *,
+        job_id: str | None = None,
+        release_id: str | None = None,
+        app: str | None = None,
+        environment: str | None = None,
+        request_id: str | None = None,
+        agent_id: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        async with self.db.write_lock():
+            await self.db.conn.execute(
+                "INSERT INTO events(ts, kind, request_id, job_id, release_id, app,"
+                " environment, agent_id, detail_json) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    time.time(),
+                    kind,
+                    request_id,
+                    job_id,
+                    release_id,
+                    app,
+                    environment,
+                    agent_id,
+                    dumps(detail or {}),
+                ),
+            )
+            await self.db.conn.commit()

@@ -136,5 +136,17 @@ class UnknownAppError(DrawbridgeError):
     code = ErrorCode.UNKNOWN_APP
 
 
+class UnknownEnvironmentError(DrawbridgeError):
+    code = ErrorCode.UNKNOWN_ENVIRONMENT
+
+
+class UnknownRefError(DrawbridgeError):
+    code = ErrorCode.UNKNOWN_REF
+
+
+class UnreachableRefError(DrawbridgeError):
+    code = ErrorCode.UNREACHABLE_REF
+
+
 class ConfigInvalidError(DrawbridgeError):
     code = ErrorCode.CONFIG_INVALID

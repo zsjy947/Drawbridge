@@ -1,0 +1,64 @@
+# Drawbridge main configuration (schema v1)
+# Deployed to /etc/drawbridge/drawbridge.yaml on the target server.
+schema_version: 1
+
+server:
+  bind_address: 0.0.0.0          # reachable from the intranet Windows clients
+  port: 8787
+  base_path: /mcp
+  allowed_cidrs:
+    - 192.168.0.0/16             # tighten to the actual intranet segment
+  allowed_origins:
+    - "http://localhost:8787"    # explicit list; no wildcard CORS
+  allowed_hosts:
+    - "192.168.18.7:8787"        # fill with the server's actual address:port
+  auth:
+    mode: none                   # switch to `token` for shared-secret checks
+    token_file: /etc/drawbridge/token
+
+paths:
+  state_dir: /var/lib/drawbridge
+  lock_dir: /run/drawbridge/locks
+  log_dir: /var/log/drawbridge
+  config_dir: /etc/drawbridge
+
+toolchain:
+  git: /usr/bin/git
+  docker: /usr/bin/docker
+  ps: /usr/bin/ps
+  buildctl: /usr/local/bin/buildctl
+
+# Per-profile registered environments (HOME and non-hazardous extras only).
+profile_env:
+  source_manage:
+    home: /var/lib/drawbridge/home/source
+  runtime_manage:
+    home: /var/lib/drawbridge/home/runtime
+  host_observe:
+    home: /var/lib/drawbridge/home/observe
+  project_diagnostic:
+    home: /var/lib/drawbridge/home/diagnostic
+
+concurrency:
+  max_read_requests: 16
+  max_running_jobs: 1
+  max_queued_jobs: 50
+  max_queued_jobs_per_target: 5
+  queue_timeout_seconds: 600
+  min_deploy_interval_seconds: 60
+
+diagnostics:
+  max_concurrent: 16
+  retention_seconds: 86400       # diagnostic jobs are kept for 24 h
+  wait_budget_seconds: 25        # HTTP wait budget before returning job_id
+
+output:
+  query_summary_max_bytes: 65536
+  log_result_max_lines: 200
+  log_result_max_bytes: 262144
+  step_log_soft_limit_bytes: 1048576
+  step_log_hard_limit_bytes: 20971520    # 20 MiB per step
+  job_log_hard_limit_bytes: 104857600    # 100 MiB per job
+
+maintenance:
+  enabled: false

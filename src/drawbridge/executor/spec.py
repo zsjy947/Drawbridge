@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,7 +58,7 @@ class ExecutionSpec:
 
     operation: str
     executable: str
-    argv: tuple[str, ...]
+    argv: Sequence[str]
     cwd: str
     env: Mapping[str, str]
     profile: ExecutionProfile

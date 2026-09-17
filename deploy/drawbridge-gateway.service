@@ -1,0 +1,36 @@
+# drawbridge-gateway systemd unit (install to /etc/systemd/system/).
+# Hardening: the whole filesystem is read-only except the state directory;
+# only INET/UNIX address families; no devices; no new privileges.
+[Unit]
+Description=Drawbridge MCP Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=drawbridge-gateway
+Group=drawbridge
+ExecStart=/opt/drawbridge/venv/bin/drawbridge-gateway --config-dir /etc/drawbridge
+Restart=on-failure
+RestartSec=3
+
+# ---- hardening (shared baseline) ----
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+ProtectSystem=strict
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# Gateway-specific: state dir only; no raw devices.
+ReadWritePaths=/var/lib/drawbridge
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target

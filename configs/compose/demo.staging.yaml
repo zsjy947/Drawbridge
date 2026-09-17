@@ -1,0 +1,24 @@
+# Compose template — ADMIN-side configuration, lives in
+# /etc/drawbridge/compose/demo.staging.yaml on the server, never inside the
+# business repository.  Drawbridge rewrites only the image reference to the
+# frozen immutable image ID of the release; ports/networks/resources are fixed.
+services:
+  api:
+    image: REPLACE_BY_DRAWBRIDGE   # replaced with the release's image ID
+    ports:
+      - "18080:8080"               # host health port matches apps.yaml
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: "65532:65532"
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512m
+    pids_limit: 128
+    restart: unless-stopped
