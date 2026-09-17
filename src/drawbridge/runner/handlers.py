@@ -186,6 +186,51 @@ async def run_project_list(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
     )
 
 
+async def run_config_validate(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
+    from drawbridge.runner.builtin import handle_config_validate
+
+    return handle_config_validate(
+        ctx.builtin_context(job.app, job.environment), job.params["file"]
+    )
+
+
+async def run_check_project_config(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
+    """Admin-fixed diagnostic script; bash --noprofile --norc, no request argv."""
+    if not _RUNTIME_LINUX:
+        raise _unsupported("check_project_config requires the Linux target host")
+    from drawbridge.config.models import ExecutionProfile, OutputPolicyKind
+    from drawbridge.executor.spec import ExecutionSpec
+
+    env_cfg = ctx.config.environment(job.app, job.environment)
+    diagnostics = env_cfg.diagnostics
+    cwd = diagnostics.root if diagnostics else env_cfg.deploy_root
+    script = "/etc/drawbridge/scripts/check_project_config.sh"
+    spec = ExecutionSpec(
+        operation="check_project_config",
+        executable="/bin/bash",
+        argv=("--noprofile", "--norc", script),
+        cwd=cwd,
+        env=build_environment(
+            ExecutionProfile.PROJECT_DIAGNOSTIC, ctx.config.main.profile_env
+        ),
+        profile=ExecutionProfile.PROJECT_DIAGNOSTIC,
+        timeout_seconds=15,
+        output_policy=OutputPolicyKind.TERMINATE,
+        max_output_bytes=ctx.config.main.output.query_summary_max_bytes,
+        hard_output_limit=ctx.config.main.output.query_summary_max_bytes,
+        accepted_exit_codes=frozenset({0}),
+    )
+    result = await ctx.process_manager.execute(spec)
+    return {
+        "exit_code": result.exit_code,
+        "accepted": result.accepted,
+        "termination_reason": result.termination_reason,
+        "stdout_preview": result.stdout_preview[:4000],
+        "stderr_preview": result.stderr_preview[:2000],
+        "observed_at": time.time(),
+    }
+
+
 async def run_process_list(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
     if not _RUNTIME_LINUX:
         raise _unsupported("process_list requires the Linux target host")
@@ -461,6 +506,8 @@ HANDLERS: dict[str, Handler] = {
     "host_metrics": run_host_metrics,
     "config_read": run_config_read,
     "project_list": run_project_list,
+    "config_validate": run_config_validate,
+    "check_project_config": run_check_project_config,
     "process_list": run_process_list,
     "compose_status": run_compose_status,
     "compose_logs": run_compose_logs,
@@ -478,6 +525,8 @@ DIAGNOSTIC_ACTIONS = frozenset(
         "host_metrics",
         "config_read",
         "project_list",
+        "config_validate",
+        "check_project_config",
         "process_list",
         "compose_status",
         "compose_logs",

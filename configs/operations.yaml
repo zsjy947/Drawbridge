@@ -105,6 +105,26 @@ operations:
         max_length: 200
         validators: [registered_subdir]
 
+  config_validate:
+    handler: config_validate
+    execution_profile: project_diagnostic
+    public: true
+    access: read
+    timeout_seconds: 15
+    parameters:
+      file:
+        type: string
+        max_length: 64
+        validators: [registered_file_alias]
+
+  check_project_config:
+    handler: check_project_config
+    execution_profile: project_diagnostic
+    public: true
+    access: read
+    timeout_seconds: 15
+    output: {policy: terminate, max_bytes: 65536}
+
   # ---------------- public write ----------------
   service_restart:
     handler: service_restart_and_verify

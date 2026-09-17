@@ -213,6 +213,39 @@ def _resolve_dir(root: str, subdir: str) -> Path:
 _RUNTIME_LINUX = sys.platform == "linux"
 
 
+def handle_config_validate(ctx: BuiltinContext, alias: str) -> dict[str, Any]:
+    """Built-in syntax validation of a registered config file.
+
+    JSON/TOML use the built-in parsers (MVP §4: 首批内置解析器).  Plugin
+    validators that execute project code are isolated_test-classified and
+    are NOT part of this read handler.
+    """
+    result = handle_config_read(ctx, alias)
+    fmt = result.get("format")
+    if fmt == "raw":
+        raise DrawbridgeError(
+            f"file alias {alias!r} is declared raw and has no structured format",
+            code=ErrorCode.INVALID_PARAMETER,
+        )
+    observed_at = time.time()
+    if result["truncated"]:
+        return {
+            "file": alias,
+            "valid": False,
+            "errors": ["file exceeds the 64 KiB validation budget"],
+            "observed_at": observed_at,
+        }
+    # The parse already happened inside handle_config_read; a failure would
+    # have raised. Reaching this point means the file parsed cleanly.
+    return {
+        "file": alias,
+        "format": fmt,
+        "valid": True,
+        "errors": [],
+        "observed_at": observed_at,
+    }
+
+
 def handle_host_metrics() -> dict[str, Any]:
     """Aggregated host metrics; Linux-only by design (910B deployment)."""
     if _RUNTIME_LINUX:
