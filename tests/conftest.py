@@ -1,0 +1,81 @@
+"""Shared test fixtures and helpers."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+import pytest
+
+from drawbridge.config.models import ExecutionProfile, OutputPolicyKind, ToolchainConfig
+from drawbridge.executor.spec import ExecutionSpec, build_environment
+
+
+@pytest.fixture()
+def profile_env():
+    from drawbridge.config.models import ProfileEnvConfig
+
+    return {p: ProfileEnvConfig() for p in ExecutionProfile}
+
+
+def make_env(profile: ExecutionProfile = ExecutionProfile.SOURCE_MANAGE) -> dict[str, str]:
+    return build_environment(profile, {})
+
+
+def make_spec(
+    argv: tuple[str, ...] = (),
+    *,
+    executable: str | None = None,
+    timeout: float = 10.0,
+    policy: OutputPolicyKind = OutputPolicyKind.TERMINATE,
+    max_output_bytes: int = 65536,
+    hard_limit: int | None = None,
+    accepted: frozenset[int] = frozenset({0}),
+    stdin_data: bytes | None = None,
+    log_path: str | None = None,
+    cwd: str | None = None,
+    operation: str = "test_op",
+) -> ExecutionSpec:
+    if executable is None:
+        executable = sys.executable
+    return ExecutionSpec(
+        operation=operation,
+        executable=executable,
+        argv=argv,
+        cwd=cwd or os.getcwd(),
+        env=make_env(),
+        profile=ExecutionProfile.SOURCE_MANAGE,
+        timeout_seconds=timeout,
+        output_policy=policy,
+        max_output_bytes=max_output_bytes,
+        hard_output_limit=hard_limit if hard_limit is not None else max_output_bytes,
+        accepted_exit_codes=accepted,
+        stdin_data=stdin_data,
+        log_path=log_path,
+    )
+
+
+@pytest.fixture()
+def toolchain() -> ToolchainConfig:
+    return ToolchainConfig()
+
+
+def pid_alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True,
+            check=False,
+        )
+        # tasklist output is locale-encoded (GBK on zh-CN Windows); decode
+        # leniently — we only need the ASCII digits of the PID column.
+        stdout = result.stdout.decode("utf-8", errors="ignore")
+        return f" {pid} " in stdout.replace("\n", " ") + " "
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
