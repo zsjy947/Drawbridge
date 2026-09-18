@@ -23,10 +23,19 @@ from typing import Any
 
 from drawbridge.config.models import ConfigFileAlias
 from drawbridge.errors import DrawbridgeError, ErrorCode
-from drawbridge.fsops import reject_symlink_components
+from drawbridge.fsops import open_file_nofollow
 
 CONFIG_READ_MAX_BYTES = 64 * 1024
 PROJECT_LIST_MAX_ENTRIES = 1000
+
+
+def parse_loadavg(text: str) -> tuple[float, float, float]:
+    """Parse /proc/loadavg — values are already load-normalized."""
+    fields = text.split()
+    if len(fields) < 3:
+        raise ValueError(f"unparseable /proc/loadavg: {text[:40]!r}")
+    loads = tuple(float(field) for field in fields[:3])
+    return loads[0], loads[1], loads[2]
 
 
 class UnsupportedError(DrawbridgeError):
@@ -77,15 +86,12 @@ def handle_config_read(ctx: BuiltinContext, alias: str) -> dict[str, Any]:
             f"file alias {alias!r} is not registered", code=ErrorCode.INVALID_PARAMETER
         )
 
-    path = reject_symlink_components(ctx.diagnostics_root, alias_spec.path)
-    size = path.stat().st_size
-    if size > CONFIG_READ_MAX_BYTES:
-        truncated = True
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            raw = fh.read(CONFIG_READ_MAX_BYTES)
-    else:
-        truncated = False
-        raw = path.read_text(encoding="utf-8", errors="replace")
+    fd = open_file_nofollow(ctx.diagnostics_root, alias_spec.path)
+    with os.fdopen(fd, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        data = fh.read(CONFIG_READ_MAX_BYTES + 1)
+    truncated = len(data) > CONFIG_READ_MAX_BYTES
+    raw = data[:CONFIG_READ_MAX_BYTES].decode("utf-8", errors="replace")
 
     observed_at = time.time()
     if alias_spec.raw:
@@ -139,19 +145,25 @@ def handle_project_list(
             code=ErrorCode.INVALID_PARAMETER,
         )
 
-    entries: list[dict[str, Any]] = []
-    truncated = False
+    # Bounded scan: stop consuming the directory after the entry cap so a
+    # huge directory cannot be fully materialized, then sort only the page.
+    scanned: list[os.DirEntry[str]] = []
+    scan_truncated = False
     try:
-        children = sorted(os.scandir(target), key=lambda e: e.name)
+        with os.scandir(target) as iterator:
+            for entry in iterator:
+                scanned.append(entry)
+                if len(scanned) > PROJECT_LIST_MAX_ENTRIES:
+                    scan_truncated = True
+                    break
     except OSError as exc:
         raise DrawbridgeError(f"cannot list {subdir!r}: {exc}", code=ErrorCode.INTERNAL) from exc
-    total = 0
+    scanned.sort(key=lambda e: e.name)
+
+    entries: list[dict[str, Any]] = []
+    truncated = scan_truncated
     start_index = int(cursor) if cursor and cursor.isdigit() else 0
-    for index, entry in enumerate(children):
-        total += 1
-        if total > PROJECT_LIST_MAX_ENTRIES:
-            truncated = True
-            break
+    for index, entry in enumerate(scanned):
         if index < start_index:
             continue
         if len(entries) >= 200:
@@ -258,7 +270,7 @@ def _linux_metrics() -> dict[str, Any]:
         with open(path, encoding="ascii") as fh:
             return fh.read()
 
-    load1, load5, load15 = (float(x) / 100 for x in read("/proc/loadavg").split()[:3])
+    load1, load5, load15 = parse_loadavg(read("/proc/loadavg"))
     mem: dict[str, int] = {}
     for line in read("/proc/meminfo").splitlines():
         key, _, rest = line.partition(":")

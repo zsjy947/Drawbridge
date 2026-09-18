@@ -103,8 +103,13 @@ sudo /opt/drawbridge/venv/bin/drawbridge-selfcheck --config-dir /etc/drawbridge
 
 自检真实验证：Python 版本、四份配置加载、状态目录可写（SQLite WAL 需本地
 文件系统）、git/docker/compose 可用且版本被记录、rootless BuildKit socket
-存在、登记仓库已克隆、磁盘预算余量。**缺 NPU 工具只禁用 `npu_status`；
-缺 BuildKit 阻止部署功能。**
+存在、登记仓库已克隆、磁盘预算余量，以及**操作目录一致性**——operations.yaml
+/workflows.yaml 中每个 handler 操作都必须有对应代码实现（executable 操作必须
+引用已登记 toolchain），YAML 与代码漂移会在启动自检时直接失败。缺 NPU 工具
+只禁用 `npu_status`；缺 BuildKit 阻止部署功能。
+
+维护模式为配置驱动：`drawbridge.yaml` 的 `maintenance.enabled` 在 Gateway
+启动时同步到 `control_state`，修改后重启 Gateway 即生效（见 OPERATIONS.md）。
 
 ## 8. 客户端接入（内网 Windows 开发机）
 

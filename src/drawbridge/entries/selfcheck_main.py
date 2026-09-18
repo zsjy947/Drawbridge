@@ -12,20 +12,9 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 from drawbridge.config.loader import load_config_from_dir
 from drawbridge.logsetup import configure_logging
-
-CHECKS: list[tuple[str, str]] = []
-
-
-def check(name: str) -> Any:
-    def decorator(func: Any) -> Any:
-        CHECKS.append((name, func.__name__))
-        return func
-
-    return decorator
 
 
 class CheckResult:
@@ -139,6 +128,44 @@ def run_checks(config_dir: str) -> CheckResult:
             results.warn(f"repo {app_id}", f"{app.git.repo_path} not cloned yet")
         else:
             results.ok(f"repo {app_id}", str(repo))
+
+    # 7b. Every registered handler operation has a code implementation and
+    # every executable operation maps to a registered toolchain path —
+    # a YAML/catalog drift must be caught before serving traffic.
+    from drawbridge.executor.spec import resolve_toolchain
+    from drawbridge.runner.handlers import DIAGNOSTIC_ACTIONS, HANDLERS
+    from drawbridge.runner.runtime import DeployRuntime
+
+    runtime_steps = DeployRuntime.__dict__
+    drift: list[str] = []
+    for op_name, op in config.operations.items():
+        if op.handler is not None:
+            implemented = op_name in HANDLERS or f"step_{op.handler}" in runtime_steps
+            if not implemented:
+                drift.append(f"{op_name}: handler {op.handler!r} not implemented")
+            if op.public and op.access.value == "read" and op_name not in DIAGNOSTIC_ACTIONS:
+                drift.append(f"{op_name}: public read not in diagnostic channel")
+        if op.executable is not None:
+            try:
+                resolve_toolchain(config.main.toolchain, op.executable)
+            except Exception:
+                drift.append(f"{op_name}: toolchain {op.executable!r} not registered")
+    # workflow steps must all be executable by the production runtime
+    for wf_name, wf in config.workflows.items():
+        for step in wf.steps:
+            if f"step_{step.operation}" not in runtime_steps:
+                drift.append(
+                    f"workflow {wf_name!r} step {step.id!r}: "
+                    f"{step.operation!r} not implemented in the deploy runtime"
+                )
+    if drift:
+        results.fail("operation catalog consistency", "; ".join(drift[:6]))
+    else:
+        results.ok(
+            "operation catalog consistency",
+            f"{len(config.operations)} operations, "
+            f"{len(config.workflows)} workflows",
+        )
 
     # 8. Disk budget headroom
     usage = shutil.disk_usage(config.main.paths.state_dir)

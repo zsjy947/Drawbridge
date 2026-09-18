@@ -17,6 +17,7 @@ workflow policy:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -32,7 +33,9 @@ from drawbridge.state.records import (
 )
 from drawbridge.state.store import Store, new_id
 
-StepExecutor = Callable[[str, "DeployState"], Awaitable[dict[str, Any]]]
+StepExecutor = Callable[
+    [str, "DeployState", dict[str, Any]], Awaitable[dict[str, Any]]
+]
 
 #: Steps that change the running service; the recovery boundary.
 RUNTIME_CHANGE_STEP = "deploy"
@@ -55,9 +58,17 @@ class DeployState:
     baseline: ReleaseRecord | None = None
     runtime_change_started: bool = False
     step_results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    workflow_steps: list[Any] = field(default_factory=list)
 
     def remaining(self) -> float:
         return self.total_budget - (time.monotonic() - self.started)
+
+    def suite_name(self) -> str | None:
+        """Suite requested by the workflow's test step, if any."""
+        for step in self.workflow_steps:
+            if step.operation == "test_suite" and step.parameters.get("suite"):
+                return str(step.parameters["suite"])
+        return None
 
 
 class DeployWorkflow:
@@ -104,7 +115,7 @@ class DeployWorkflow:
                 await self.store.mark_runtime_change_started(job.job_id)
             try:
                 detail = await asyncio_wait_for(
-                    self.step_executor(step.operation, state),
+                    self.step_executor(step.operation, state, dict(step.parameters)),
                     timeout=budget,
                 )
                 await self.store.finish_step(
@@ -115,9 +126,14 @@ class DeployWorkflow:
                     step_record_id,
                     status="failed",
                     termination_reason=type(exc).__name__,
-                    detail={"error": str(exc)},
+                    detail={"error": str(exc)[:300]},
                 )
                 completed_steps.append(step.id)
+                if isinstance(exc, asyncio.CancelledError):
+                    # Runner shutdown mid-deploy: never continue into
+                    # recovery with a torn-down executor — the operator
+                    # reconciles the scene instead (spec §8).
+                    raise
                 failure = exc
                 break
             state.step_results[step.id] = detail
@@ -160,7 +176,7 @@ class DeployWorkflow:
         if plan.baseline_release_id != baseline_id:
             raise StalePlanError("baseline release changed since planning")
         await self.store.mark_plan(plan.plan_id, PlanStatus.APPLIED)
-        return DeployState(
+        state = DeployState(
             job=job,
             plan=plan,
             app=plan.app,
@@ -170,7 +186,9 @@ class DeployWorkflow:
             recovery_budget=float(self.workflow.recovery_timeout_seconds),
             commit_sha=plan.commit_sha,
             baseline=baseline,
+            workflow_steps=list(self.workflow.steps),
         )
+        return state
 
     def _step_budget(self, step_id: str) -> float:
         configured = self.step_budgets.get(step_id)
@@ -184,6 +202,7 @@ class DeployWorkflow:
         release_id = new_id()
         now = time.time()
         env_cfg = self.config.environment(state.app, state.environment)
+        rendered_compose = state.step_results.get("deploy", {}).get("compose_file")
         release = ReleaseRecord(
             release_id=release_id,
             app=state.app,
@@ -196,7 +215,7 @@ class DeployWorkflow:
             config_digest=self.config.digest,
             status="succeeded",
             rollback_of=None,
-            compose_path=env_cfg.compose_file,
+            compose_path=str(rendered_compose) if rendered_compose else env_cfg.compose_file,
             deploy_dir=env_cfg.deploy_root,
             evidence={
                 "health": state.step_results.get("health", {}),
@@ -207,6 +226,20 @@ class DeployWorkflow:
             verified_at=now,
         )
         await self.store.record_release(release)
+        await self.store.append_event(
+            "release_recorded",
+            job_id=job.job_id,
+            release_id=release_id,
+            app=state.app,
+            environment=state.environment,
+            request_id=job.request_id,
+            agent_id=job.agent_id,
+            detail={
+                "status": "succeeded",
+                "commit_sha": state.commit_sha,
+                "image_id": state.image_id,
+            },
+        )
         if state.image_id:
             await self.store.record_artifact(
                 ArtifactRecord(
@@ -235,10 +268,13 @@ class DeployWorkflow:
         """Independent recovery budget; never re-runs the release itself."""
         recovery_started = time.monotonic()
         recovery: dict[str, Any] = {}
+        suite_params = (
+            {"suite": state.suite_name()} if state.suite_name() else {}
+        )
         try:
             if state.baseline is None:
                 await asyncio_wait_for(
-                    self.step_executor("stop_initial", state),
+                    self.step_executor("stop_initial", state, {}),
                     timeout=max(1.0, min(30.0, state.recovery_budget)),
                 )
                 recovery = {
@@ -250,7 +286,7 @@ class DeployWorkflow:
                 state.image_tag = state.baseline.image_tag
                 state.commit_sha = state.baseline.commit_sha
                 await asyncio_wait_for(
-                    self.step_executor("restore_previous", state),
+                    self.step_executor("restore_previous", state, suite_params),
                     timeout=state.recovery_budget,
                 )
                 recovery = {
@@ -260,14 +296,25 @@ class DeployWorkflow:
             recovery["recovery_seconds"] = round(
                 time.monotonic() - recovery_started, 3
             )
-            return recovery
         except BaseException as exc:
-            return {
+            recovery = {
                 "status": "recovery_failed",
-                "baseline_release_id": state.baseline.release_id if state.baseline else None,
+                "baseline_release_id": (
+                    state.baseline.release_id if state.baseline else None
+                ),
                 "error": str(exc)[:300],
                 "needs_attention": True,
             }
+        await self.store.append_event(
+            "deploy_recovery",
+            job_id=job.job_id,
+            app=state.app,
+            environment=state.environment,
+            request_id=job.request_id,
+            agent_id=job.agent_id,
+            detail=recovery,
+        )
+        return recovery
 
     def _failure_status(
         self, job: JobRecord, recovery: dict[str, Any] | None
@@ -279,14 +326,6 @@ class DeployWorkflow:
         if recovery.get("status") == "stopped_initial":
             return JobStatus.FAILED_NO_BASELINE
         return JobStatus.ROLLBACK_FAILED
-
-
-async def run_rollback(ctx: Any, job: JobRecord) -> dict[str, Any]:
-    """Explicit rollback handler: re-deploy historical artifacts."""
-    raise DrawbridgeError(
-        "explicit rollback requires the compose runtime on the target host",
-        code=ErrorCode.UNSUPPORTED,
-    )
 
 
 def _release_dict(release: Any) -> dict[str, Any] | None:
@@ -309,6 +348,4 @@ def _error_code(failure: BaseException) -> str:
 
 
 async def asyncio_wait_for(awaitable: Any, timeout: float) -> Any:
-    import asyncio
-
     return await asyncio.wait_for(awaitable, timeout=timeout)

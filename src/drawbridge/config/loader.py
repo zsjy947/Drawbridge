@@ -113,7 +113,12 @@ def load_config_bundle(
     operations_file = load_operations_config(operations_path)
     workflows_file = load_workflows_config(workflows_path)
 
-    _cross_validate(apps_file.apps, operations_file.operations, workflows_file.workflows)
+    _cross_validate(
+        apps_file.apps,
+        operations_file.operations,
+        workflows_file.workflows,
+        build_profiles=apps_file.build_profiles,
+    )
 
     digest_source = json.dumps(
         {
@@ -131,6 +136,7 @@ def load_config_bundle(
     return DrawbridgeConfig(
         main=main,
         apps=apps_file.apps,
+        build_profiles=apps_file.build_profiles,
         operations=operations_file.operations,
         workflows=workflows_file.workflows,
         digest=digest,
@@ -138,9 +144,21 @@ def load_config_bundle(
 
 
 def _cross_validate(
-    apps: dict[str, Any], operations: dict[str, Any], workflows: dict[str, Any]
+    apps: dict[str, Any],
+    operations: dict[str, Any],
+    workflows: dict[str, Any],
+    *,
+    build_profiles: dict[str, Any] | None = None,
 ) -> None:
     """Reference checks that span several files."""
+    for app_id, app in apps.items():
+        for env_name, env in app.environments.items():
+            profile = getattr(env, "build_profile", None)
+            if profile is not None and profile not in (build_profiles or {}):
+                raise ConfigInvalidError(
+                    f"app {app_id!r} environment {env_name!r} references unknown "
+                    f"build profile {profile!r}"
+                )
     for workflow_name, workflow in workflows.items():
         for step in workflow.steps:
             if step.operation not in operations:

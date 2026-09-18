@@ -41,7 +41,9 @@ def diag_root(tmp_path: Path) -> Path:
     (root / "config" / "app.json").write_text(
         json.dumps(payload), encoding="utf-8"
     )
-    (root / "README.md").write_text("hello\n", encoding="utf-8")
+    # bytes: deterministic line endings across platforms (raw alias asserts
+    # exact on-disk content)
+    (root / "README.md").write_bytes(b"hello\n")
     return root
 
 
@@ -190,3 +192,32 @@ class TestProjectList:
         result = handle_project_list(make_ctx(diag_root, {}), ".")
         kinds = {e["name"]: e["type"] for e in result["entries"]}
         assert kinds["pipe"] == "other"
+
+
+class TestLoadavgParsing:
+    def test_parse_loadavg_uses_kernel_values_as_is(self) -> None:
+        from drawbridge.runner.builtin import parse_loadavg
+
+        # /proc/loadavg values are already load-normalized (e.g. 0.52)
+        assert parse_loadavg("0.52 0.58 0.59 1/487 12345") == (0.52, 0.58, 0.59)
+
+    def test_parse_loadavg_rejects_garbage(self) -> None:
+        from drawbridge.runner.builtin import parse_loadavg
+
+        with pytest.raises(ValueError):
+            parse_loadavg("garbage")
+
+
+class TestBoundedScan:
+    def test_scan_stops_at_entry_cap(self, diag_root: Path, monkeypatch) -> None:
+        import drawbridge.runner.builtin as builtin
+
+        monkeypatch.setattr(builtin, "PROJECT_LIST_MAX_ENTRIES", 5)
+        bulk = diag_root / "bulk"
+        bulk.mkdir()
+        for i in range(20):
+            (bulk / f"f{i:02d}").write_text("x", encoding="utf-8")
+        result = handle_project_list(make_ctx(diag_root, {}), "bulk")
+        # the directory iteration stopped at cap+1: never all 20 entries
+        assert len(result["entries"]) == 6
+        assert result["truncated"] is True

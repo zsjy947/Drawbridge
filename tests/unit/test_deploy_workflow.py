@@ -33,8 +33,12 @@ class FakeRuntime:
         self.calls: list[str] = []
         self.fail_at = fail_at
         self.fail_recover = fail_recover
+        self.params_seen: list[dict] = []
 
-    async def __call__(self, operation: str, state: Any) -> dict[str, Any]:
+    async def __call__(
+        self, operation: str, state: Any, params: dict | None = None
+    ) -> dict[str, Any]:
+        self.params_seen.append(dict(params or {}))
         if operation in ("stop_initial", "restore_previous"):
             self.calls.append(operation)
             if self.fail_recover:

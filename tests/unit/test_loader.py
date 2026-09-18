@@ -48,6 +48,13 @@ apps:
             url: http://127.0.0.1:18080/healthz
         services: [api, worker]
         restartable_services: [api]
+
+build_profiles:
+  demo:
+    context: .
+    dockerfile_basename: Dockerfile
+    platform: linux/arm64
+    timeout_seconds: 900
 """
 
 OPERATIONS_YAML = """

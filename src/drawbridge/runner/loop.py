@@ -30,8 +30,6 @@ from drawbridge.state.store import Store
 
 log = get_logger(__name__)
 
-_TERMINAL_BY_KIND: dict[str, str] = {}
-
 
 class Runner:
     def __init__(
@@ -54,8 +52,17 @@ class Runner:
         self.diagnostic_actions = (
             diagnostic_actions if diagnostic_actions is not None else DIAGNOSTIC_ACTIONS
         )
-        self.mutation_handler = mutation_handler
         self.process_manager = ProcessManager()
+        if mutation_handler is None:
+            from drawbridge.runner.runtime import DeployRuntime
+
+            mutation_handler = DeployRuntime(
+                config=self.config,
+                store=self.store,
+                process_manager=self.process_manager,
+                log_dir=self.config.main.paths.log_dir,
+            )
+        self.mutation_handler = mutation_handler
         self.locks = TargetLocks(lock_dir=Path(config.main.paths.lock_dir))
         self.poll_interval = poll_interval
         self._stopping = asyncio.Event()
@@ -182,21 +189,29 @@ class Runner:
                 (job.job_id,),
             )
             await self.store.db.conn.commit()
+        await self.store.append_event(
+            "job_requeued",
+            job_id=job.job_id,
+            app=job.app,
+            environment=job.environment,
+            request_id=job.request_id,
+            agent_id=job.agent_id,
+            detail={"reason": "cross-process target lock busy"},
+        )
 
     async def _execute(self, job: Any, *, diagnostic: bool) -> None:
         action = job.action
         handler = self.handlers.get(action)
         if handler is None:
-            await self.store.finish_job(
-                job.job_id,
-                status=JobStatus.FAILED,
-                result={
+            await self._finish_with_event(
+                job,
+                JobStatus.FAILED,
+                {
                     "error": {
                         "code": "UNKNOWN_OPERATION",
                         "message": f"no handler for {action!r}",
                     }
                 },
-                owner=self.instance_id,
             )
             return
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(job.job_id))
@@ -211,12 +226,7 @@ class Runner:
                 log_dir=self.config.main.paths.log_dir,
             )
             result = await asyncio.wait_for(handler(ctx, job), timeout=self._job_timeout(job))
-            await self.store.finish_job(
-                job.job_id,
-                status=JobStatus.SUCCEEDED,
-                result=result,
-                owner=self.instance_id,
-            )
+            await self._finish_with_event(job, JobStatus.SUCCEEDED, result)
             log.info(
                 "job finished",
                 job_id=job.job_id,
@@ -224,43 +234,63 @@ class Runner:
                 seconds=round(time.monotonic() - started, 3),
             )
         except TimeoutError:
-            await self.store.finish_job(
-                job.job_id,
-                status=JobStatus.FAILED,
-                result={"error": {"code": "TIMEOUT", "message": "job deadline exceeded"}},
-                owner=self.instance_id,
+            await self._finish_with_event(
+                job,
+                JobStatus.FAILED,
+                {"error": {"code": "TIMEOUT", "message": "job deadline exceeded"}},
             )
         except DrawbridgeError as exc:
-            await self.store.finish_job(
-                job.job_id,
-                status=JobStatus.FAILED,
-                result={"error": exc.to_dict()},
-                owner=self.instance_id,
-            )
+            await self._finish_with_event(job, JobStatus.FAILED, {"error": exc.to_dict()})
         except asyncio.CancelledError:
-            await self.store.finish_job(
-                job.job_id,
-                status=JobStatus.NEEDS_ATTENTION,
-                result={
+            await self._finish_with_event(
+                job,
+                JobStatus.NEEDS_ATTENTION,
+                {
                     "error": {
                         "code": "NEEDS_ATTENTION",
                         "message": "runner stopped mid-job; verify the actual scene",
                     }
                 },
-                owner=self.instance_id,
             )
             raise
         except Exception as exc:
-            await self.store.finish_job(
-                job.job_id,
-                status=JobStatus.FAILED,
-                result={
-                    "error": {"code": "INTERNAL", "message": f"{type(exc).__name__}: {exc}"[:500]}
+            await self._finish_with_event(
+                job,
+                JobStatus.FAILED,
+                {
+                    "error": {
+                        "code": "INTERNAL",
+                        "message": f"{type(exc).__name__}: {exc}"[:500],
+                    }
                 },
-                owner=self.instance_id,
             )
         finally:
             heartbeat_task.cancel()
+
+    async def _finish_with_event(
+        self,
+        job: Any,
+        status: str,
+        result: dict[str, Any] | None,
+        recovery: dict[str, Any] | None = None,
+    ) -> None:
+        """Terminal transition plus the append-only audit event."""
+        await self.store.finish_job(
+            job.job_id,
+            status=status,
+            result=result,
+            recovery=recovery,
+            owner=self.instance_id,
+        )
+        await self.store.append_event(
+            "job_finished",
+            job_id=job.job_id,
+            app=job.app,
+            environment=job.environment,
+            request_id=job.request_id,
+            agent_id=job.agent_id,
+            detail={"action": job.action, "status": status},
+        )
 
     def _job_timeout(self, job: Any) -> float:
         if job.deadline_at is None:
@@ -277,30 +307,65 @@ class Runner:
             raise
 
     async def _execute_deploy(self, job: Any) -> None:
+        """Deploy jobs run the frozen workflow; every exit path terminates
+        the job (the stuck-running bug this replaces lost failures)."""
         from drawbridge.runner.deploy import DeployWorkflow
 
-        self.workflow_for(job)  # validates the workflow exists
-        executor = self.mutation_handler
-        if executor is None:
-            raise DrawbridgeError(
-                "deploy runtime is not available on this host; run the Runner on "
-                "the target server (self-check enforces this)",
-                code="UNSUPPORTED",
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(job.job_id))
+        try:
+            try:
+                self.workflow_for(job)  # validates the workflow exists
+            except DrawbridgeError as exc:
+                await self._finish_with_event(job, JobStatus.FAILED, {"error": exc.to_dict()})
+                return
+            workflow_runner = DeployWorkflow(
+                config=self.config,
+                store=self.store,
+                step_executor=self.mutation_handler,
+                workflow_name=job.action,
             )
-        workflow_runner = DeployWorkflow(
-            config=self.config,
-            store=self.store,
-            step_executor=executor,
-            workflow_name=job.action,
-        )
-        status, result, recovery = await workflow_runner.run(job)
-        await self.store.finish_job(
-            job.job_id,
-            status=status,
-            result=result,
-            recovery=recovery,
-            owner=self.instance_id,
-        )
+            try:
+                status, result, recovery = await asyncio.wait_for(
+                    workflow_runner.run(job), timeout=self._job_timeout(job)
+                )
+            except asyncio.CancelledError:
+                await self._finish_with_event(
+                    job,
+                    JobStatus.NEEDS_ATTENTION,
+                    {
+                        "error": {
+                            "code": "NEEDS_ATTENTION",
+                            "message": "runner stopped mid-deploy; verify the "
+                            "actual scene before any further change",
+                        }
+                    },
+                )
+                raise
+            except TimeoutError:
+                await self._finish_with_event(
+                    job,
+                    JobStatus.FAILED,
+                    {"error": {"code": "TIMEOUT", "message": "deploy deadline exceeded"}},
+                )
+                return
+            except DrawbridgeError as exc:
+                await self._finish_with_event(job, JobStatus.FAILED, {"error": exc.to_dict()})
+                return
+            except Exception as exc:
+                await self._finish_with_event(
+                    job,
+                    JobStatus.FAILED,
+                    {
+                        "error": {
+                            "code": "INTERNAL",
+                            "message": f"{type(exc).__name__}: {exc}"[:500],
+                        }
+                    },
+                )
+                return
+            await self._finish_with_event(job, status, result, recovery)
+        finally:
+            heartbeat_task.cancel()
 
     def workflow_for(self, job: Any) -> Any:
         name = job.action

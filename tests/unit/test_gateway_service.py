@@ -230,3 +230,78 @@ class TestPlanApply:
             plan_id=plan.plan_id, idempotency_key="apply-b-xxxxxxxx"
         )
         assert a["job_id"] == b["job_id"]
+
+
+class TestOpsLogsStrictValidation:
+    async def test_bool_and_string_numbers_rejected(self, setup) -> None:
+        service, _store, _config = setup
+        for bad in (True, "50", 1.5):
+            with pytest.raises(InvalidParameterError):
+                await service.ops_logs(
+                    app="demo", environment="staging", limit=bad
+                )
+        with pytest.raises(InvalidParameterError):
+            await service.ops_logs(app="demo", environment="staging", tail=True)
+        with pytest.raises(InvalidParameterError):
+            await service.ops_logs(app="demo", environment="staging", since_seconds="300")
+
+    async def test_bounds_enforced(self, setup) -> None:
+        service, _store, _config = setup
+        with pytest.raises(InvalidParameterError):
+            await service.ops_logs(app="demo", environment="staging", limit=201)
+        with pytest.raises(InvalidParameterError):
+            await service.ops_logs(app="demo", environment="staging", tail=1001)
+        with pytest.raises(InvalidParameterError):
+            await service.ops_logs(app="demo", environment="staging", since_seconds=0)
+        with pytest.raises(InvalidParameterError):
+            await service.ops_logs(app="demo", environment="staging", query="x" * 129)
+        with pytest.raises(InvalidParameterError):
+            await service.ops_logs(app="demo", environment="staging", query="bad\x1b[")
+        with pytest.raises(InvalidParameterError):
+            await service.ops_logs(app="demo", environment="staging", service="unknown-svc")
+
+    async def test_valid_params_admit_diagnostic(self, setup) -> None:
+        service, _store, _config = setup
+        result = await service.ops_logs(
+            app="demo",
+            environment="staging",
+            service="api",
+            limit=50,
+            tail=100,
+            since_seconds=60,
+            query="error",
+        )
+        # no runner is connected: the diagnostic stays pending, but admission
+        # itself succeeded (strict values accepted as-is)
+        assert result["status"] == "pending"
+
+
+class TestAuditEvents:
+    async def test_write_admission_appends_event(self, setup) -> None:
+        service, store, _config = setup
+        payload = await service.ops_service_restart(
+            app="demo",
+            environment="staging",
+            service="api",
+            reason="audit check",
+            idempotency_key="audit-00000001",
+        )
+        job_id = payload["job_id"]
+        async with store.db.conn.execute(
+            "SELECT kind, detail_json FROM events WHERE job_id = ?", (job_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        assert rows and rows[0]["kind"] == "job_admitted"
+
+
+class TestMaintenanceSync:
+    async def test_config_value_persisted_to_control_record(self, setup) -> None:
+        from drawbridge.entries.gateway_main import sync_maintenance_from_config
+
+        _service, store, config = setup
+        config.main.maintenance.enabled = True
+        assert await sync_maintenance_from_config(store.db, config) == "true"
+        assert await store.db.get_control("maintenance") == "true"
+        config.main.maintenance.enabled = False
+        assert await sync_maintenance_from_config(store.db, config) == "false"
+        assert await store.db.get_control("maintenance") == "false"

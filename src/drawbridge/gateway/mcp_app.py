@@ -16,7 +16,6 @@ from typing import Any
 
 from mcp import types
 from mcp.server import Server
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from drawbridge.errors import DrawbridgeError
 from drawbridge.gateway.service import GatewayService
@@ -220,11 +219,7 @@ class MCPAppFactory:
             on_list_tools=self._list_tools,
             on_call_tool=self._call_tool,
         )
-        self.session_manager = StreamableHTTPSessionManager(
-            app=self.server,
-            json_response=True,
-            stateless=stateless,
-        )
+        self.stateless = stateless
 
     async def _list_tools(self, _ctx: Any, _params: Any) -> types.ListToolsResult:
         return types.ListToolsResult(tools=build_tool_definitions())
@@ -268,9 +263,11 @@ class MCPAppFactory:
                 service=args.get("service"),
                 query=args.get("query", ""),
                 cursor=args.get("cursor"),
-                limit=int(args.get("limit", 100)),
-                tail=int(args.get("tail", 200)),
-                since_seconds=int(args.get("since_seconds", 300)),
+                # Raw values: strict validation in the service layer rejects
+                # bools/strings — no coercion at the protocol boundary.
+                limit=args.get("limit", 100),
+                tail=args.get("tail", 200),
+                since_seconds=args.get("since_seconds", 300),
             )
         if name == "ops_release_plan":
             return await svc.ops_release_plan(

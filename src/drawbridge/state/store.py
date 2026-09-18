@@ -46,6 +46,10 @@ from drawbridge.state.records import (
 
 TERMINAL_DEPLOY_KINDS = (JobKind.DEPLOY, JobKind.ROLLBACK)
 
+#: Job statuses that block every further mutation on their target until an
+#: operator reconciles the scene (tech design §7 / MVP spec §8).
+BLOCKING_STATUSES = (JobStatus.ROLLBACK_FAILED, JobStatus.NEEDS_ATTENTION)
+
 
 def new_id() -> str:
     return str(uuid.uuid4())
@@ -177,13 +181,17 @@ class Store:
             await conn.execute("BEGIN IMMEDIATE")
             try:
                 existing = await self._find_duplicate(
-                    conn, idempotency_key, digest, plan_id
+                    conn, idempotency_key, digest, plan_id, now
                 )
                 if existing is not None:
-                    await conn.rollback()
+                    # Dedup is read-only except for one case: binding a NEW
+                    # idempotency key to an existing plan job (MVP spec §7).
+                    # Commit (not rollback) so that binding survives.
+                    await conn.commit()
                     return existing
 
                 if kind != JobKind.DIAGNOSTIC:
+                    await self._check_target_not_blocked(conn, app, environment)
                     await self._check_capacity(
                         conn, app, environment, max_queued, max_queued_per_target
                     )
@@ -243,6 +251,7 @@ class Store:
         idempotency_key: str | None,
         digest: str,
         plan_id: str | None,
+        now: float,
     ) -> JobRecord | None:
         if idempotency_key is not None:
             async with conn.execute(
@@ -262,8 +271,48 @@ class Store:
             ) as cursor:
                 row = await cursor.fetchone()
             if row is not None:
-                return await self._job_by_id_in_conn(conn, row["job_id"])
+                job = await self._job_by_id_in_conn(conn, row["job_id"])
+                # A new key may bind to the existing plan job, but only when
+                # the request content is identical (MVP spec §7).
+                if idempotency_key is not None:
+                    if request_digest(job.action, job.params) != digest:
+                        raise IdempotencyConflictError(
+                            "this plan already has a job created from different "
+                            "request content"
+                        )
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO idempotency_keys(key, action, app,"
+                        " environment, request_digest, job_id, created_at)"
+                        " VALUES(?,?,?,?,?,?,?)",
+                        (
+                            idempotency_key,
+                            job.action,
+                            job.app,
+                            job.environment,
+                            digest,
+                            job.job_id,
+                            now,
+                        ),
+                    )
+                return job
         return None
+
+    async def _check_target_not_blocked(
+        self, conn: Any, app: str, environment: str
+    ) -> None:
+        placeholders = ",".join("?" * len(BLOCKING_STATUSES))
+        query = (
+            "SELECT job_id FROM jobs WHERE app = ? AND environment = ?"  # noqa: S608
+            " AND status IN (" + placeholders + ") LIMIT 1"
+        )
+        async with conn.execute(query, (app, environment, *BLOCKING_STATUSES)) as cursor:
+            row = await cursor.fetchone()
+        if row is not None:
+            raise DrawbridgeError(
+                "target is blocked by an unresolved "
+                "rollback_failed/needs_attention job; reconcile the scene first",
+                code=ErrorCode.NEEDS_ATTENTION,
+            )
 
     async def _check_capacity(
         self,
@@ -387,12 +436,14 @@ class Store:
                             JobStatus.QUEUED,
                         ),
                     )
-                    if cursor.rowcount == -1 and conn.total_changes < 0:  # pragma: no cover
+                    update_cursor = await conn.execute(
+                        "SELECT status, owner FROM jobs WHERE job_id = ?", (job.job_id,)
+                    )
+                    updated = await update_cursor.fetchone()
+                    if updated is None or updated["status"] != JobStatus.RUNNING:
+                        # pragma: no cover - guarded by the IMMEDIATE txn
                         continue
                     claimed = await self._job_by_id_in_conn(conn, job.job_id)
-                    if claimed.status != JobStatus.RUNNING:  # pragma: no cover
-                        claimed = None
-                        continue
                     break
                 await conn.commit()
             except BaseException:

@@ -49,6 +49,46 @@ _WRITE_KINDS: dict[str, str] = {
 }
 
 
+def _log_param_specs(*, include_service: bool, include_cursor: bool) -> dict[str, Any]:
+    """ops_logs envelope validation — the same rules as the compose_logs
+    operation (MVP spec §2/§4); strict types, no coercion.
+
+    ``service`` and ``cursor`` are optional: their specs are only part of
+    the validated set when the client actually provided a value (specs
+    without a default are treated as required by the validation engine).
+    """
+    from drawbridge.config.models import ParameterSpec
+
+    specs: dict[str, Any] = {
+        "query": ParameterSpec.model_validate(
+            {"type": "string", "default": "", "max_length": 128}
+        ),
+        "limit": ParameterSpec.model_validate(
+            {"type": "integer", "default": 100, "minimum": 1, "maximum": 200}
+        ),
+        "tail": ParameterSpec.model_validate(
+            {"type": "integer", "default": 200, "minimum": 1, "maximum": 1000}
+        ),
+        "since_seconds": ParameterSpec.model_validate(
+            {"type": "integer", "default": 300, "minimum": 1, "maximum": 86400}
+        ),
+    }
+    if include_service:
+        specs["service"] = ParameterSpec.model_validate(
+            {
+                "type": "string",
+                "max_length": 64,
+                "pattern": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}",
+                "validators": ["registered_service"],
+            }
+        )
+    if include_cursor:
+        specs["cursor"] = ParameterSpec.model_validate(
+            {"type": "string", "max_length": 512, "validators": ["opaque_cursor"]}
+        )
+    return specs
+
+
 class GatewayService:
     def __init__(
         self,
@@ -180,6 +220,20 @@ class GatewayService:
             agent_id=agent_id,
             parent_task_id=parent_task_id,
         )
+        await self.store.append_event(
+            "job_admitted",
+            job_id=job.job_id,
+            app=app,
+            environment=environment,
+            request_id=request_id,
+            agent_id=agent_id,
+            detail={
+                "kind": kind,
+                "action": action,
+                "plan_id": plan_id,
+                "job_status": job.status,
+            },
+        )
         return {
             "request_id": request_id,
             "status": "queued",
@@ -292,7 +346,17 @@ class GatewayService:
                 "idempotency_key is required for every non-read operation"
             )
         validate_idempotency_key(idempotency_key)
-        kind = _WRITE_KINDS.get(operation, JobKind.RESTART)
+        if operation not in _WRITE_KINDS:
+            # A registered public write operation MUST have an explicit job
+            # kind; silently treating a new one as a restart would misroute
+            # it to the wrong handler.
+            raise DrawbridgeError(
+                f"operation {operation!r} has no registered job kind; "
+                "extend the gateway mapping when registering new write "
+                "operations",
+                code=ErrorCode.CONFIG_INVALID,
+            )
+        kind = _WRITE_KINDS[operation]
         if agent_id:
             validate_tracing_id(agent_id, field="agent_id")
         if parent_task_id:
@@ -356,26 +420,28 @@ class GatewayService:
         service: str | None = None,
         query: str = "",
         cursor: str | None = None,
-        limit: int = 100,
-        tail: int = 200,
-        since_seconds: int = 300,
+        limit: Any = 100,
+        tail: Any = 200,
+        since_seconds: Any = 300,
     ) -> dict[str, Any]:
         request_id = self._request_id()
-        env_cfg = self._env_cfg(app, environment)
-        if service is not None and service not in env_cfg.services:
-            raise InvalidParameterError(
-                f"service {service!r} is not registered for app {app!r}"
-            )
-        params: dict[str, Any] = {
-            "query": query,
-            "limit": limit,
-            "tail": tail,
-            "since_seconds": since_seconds,
-        }
+        self._env_cfg(app, environment)
+        provided: dict[str, Any] = {"query": query, "limit": limit, "tail": tail,
+                                    "since_seconds": since_seconds}
         if service is not None:
-            params["service"] = service
+            provided["service"] = service
         if cursor is not None:
-            params["cursor"] = cursor
+            provided["cursor"] = cursor
+        # Strict validation at the edge: bools, numeric strings and
+        # out-of-range values are rejected here, never coerced.
+        resolved = validate_parameters(
+            _log_param_specs(
+                include_service=service is not None, include_cursor=cursor is not None
+            ),
+            provided,
+            self._validation_context(app, environment),
+        )
+        params: dict[str, Any] = dict(resolved)
         result, job_id = await self._run_diagnostic(
             action="compose_logs",
             app=app,

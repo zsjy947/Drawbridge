@@ -31,7 +31,13 @@ from drawbridge.runner.builtin import (
     handle_host_metrics,
     handle_project_list,
 )
-from drawbridge.state.records import JobRecord
+from drawbridge.runner.health import probe_health_checks
+from drawbridge.runner.logpage import (
+    LogCursorCache,
+    UnknownCursorError,
+    paginate_lines,
+)
+from drawbridge.state.records import JobRecord, ReleaseRecord
 from drawbridge.state.store import Store
 
 Handler = Callable[["JobContext", JobRecord], Awaitable[dict[str, Any]]]
@@ -39,6 +45,9 @@ Handler = Callable[["JobContext", JobRecord], Awaitable[dict[str, Any]]]
 # Runtime platform, deliberately not an inline sys.platform expression:
 # mypy on a dev host must not constant-fold away the Linux-only code paths.
 _RUNTIME_LINUX = sys.platform == "linux"
+
+#: Process-wide snapshot cache for log cursors (bound to one fetch, 10 min).
+_LOG_CACHE = LogCursorCache()
 
 
 @dataclass
@@ -83,6 +92,17 @@ class JobContext:
             ExecutionProfile.HOST_OBSERVE,
             self.config.main.profile_env,
             platform=None,
+        )
+
+    def runtime(self) -> Any:
+        """The production DeployRuntime (target-host step executor)."""
+        from drawbridge.runner.runtime import DeployRuntime
+
+        return DeployRuntime(
+            config=self.config,
+            store=self.store,
+            process_manager=self.process_manager,
+            log_dir=self.log_dir,
         )
 
 
@@ -130,6 +150,21 @@ async def run_release_plan(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
             "workspace_status": status_summary,
         },
         request_id=job.request_id,
+    )
+    await ctx.store.append_event(
+        "plan_created",
+        job_id=job.job_id,
+        app=app_id,
+        environment=job.environment,
+        request_id=job.request_id,
+        agent_id=job.agent_id,
+        detail={
+            "plan_id": plan.plan_id,
+            "git_ref": job.params["git_ref"],
+            "commit_sha": resolution.commit_sha,
+            "source_mode": job.params["source_mode"],
+            "baseline_release_id": plan.baseline_release_id,
+        },
     )
     return {
         "plan_id": plan.plan_id,
@@ -271,24 +306,103 @@ async def run_compose_status(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
 
 
 async def run_compose_logs(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
+    """Bounded snapshot fetch → literal filter → cursor pagination."""
     env_cfg = ctx.config.environment(job.app, job.environment)
     service = job.params.get("service")
     if service is not None and service not in env_cfg.services:
         raise DrawbridgeError(
             f"service {service!r} is not registered", code=ErrorCode.INVALID_PARAMETER
         )
+    # Defense in depth: the Gateway validated these; the Runner re-checks
+    # bounds so a malformed params dict can never reach compose argv.
+    tail = _bounded_int(job.params.get("tail", 200), 1, 1000, "tail")
+    since = _bounded_int(job.params.get("since_seconds", 300), 1, 86400, "since_seconds")
+    limit = _bounded_int(job.params.get("limit", 100), 1, 200, "limit")
+    query = job.params.get("query", "")
+    if not isinstance(query, str) or len(query) > 128 or _has_control_chars(query):
+        raise DrawbridgeError("query is invalid", code=ErrorCode.INVALID_PARAMETER)
+    cursor = job.params.get("cursor")
+
+    observed_at = time.time()
+    if cursor is not None:
+        if not isinstance(cursor, str):
+            raise DrawbridgeError("cursor must be a string", code=ErrorCode.INVALID_PARAMETER)
+        try:
+            snapshot_id, snapshot, offset = _LOG_CACHE.resolve(cursor)
+        except UnknownCursorError as exc:
+            raise DrawbridgeError(
+                str(exc), code=ErrorCode.INVALID_PARAMETER
+            ) from exc
+        page = paginate_lines(
+            snapshot.lines,
+            query=query,
+            offset=offset,
+            limit=limit,
+            max_bytes=ctx.config.main.output.log_result_max_bytes,
+        )
+        return _log_page(page, snapshot_id, False, observed_at)
+
     argv = [
         "logs",
         "--no-color",
         "--timestamps",
         "--tail",
-        str(int(job.params.get("tail", 200))),
+        str(tail),
         "--since",
-        _rfc3339(int(job.params.get("since_seconds", 300))),
+        _rfc3339(since),
     ]
     if service:
         argv.append(service)
-    return await _compose_command(ctx, job, argv, timeout=15)
+    fetched = await _compose_command(
+        ctx, job, argv, timeout=15, parse_full_output=True
+    )
+    lines = [line for line in fetched["stdout_preview"].splitlines() if line.strip()]
+    snapshot_id = _LOG_CACHE.create(lines)
+    page = paginate_lines(
+        lines,
+        query=query,
+        offset=0,
+        limit=limit,
+        max_bytes=ctx.config.main.output.log_result_max_bytes,
+    )
+    return _log_page(page, snapshot_id, bool(fetched["truncated"]), observed_at)
+
+
+def _log_page(
+    page: dict[str, object],
+    snapshot_id: str,
+    fetch_truncated: bool,
+    observed_at: float,
+) -> dict[str, Any]:
+    next_offset = page["next_offset"]
+    return {
+        "lines": page["lines"],
+        "matched_total": page["matched_total"],
+        "snapshot_total": page["snapshot_total"],
+        "truncated": page["truncated"],
+        "fetch_truncated": fetch_truncated,
+        "next_cursor": (
+            f"{snapshot_id}:{next_offset}" if next_offset is not None else None
+        ),
+        "observed_at": observed_at,
+    }
+
+
+def _bounded_int(value: Any, minimum: int, maximum: int, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise DrawbridgeError(
+            f"{name} must be an integer", code=ErrorCode.INVALID_PARAMETER
+        )
+    if not (minimum <= value <= maximum):
+        raise DrawbridgeError(
+            f"{name} must be between {minimum} and {maximum}",
+            code=ErrorCode.INVALID_PARAMETER,
+        )
+    return value
+
+
+def _has_control_chars(value: str) -> bool:
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
 
 
 def _rfc3339(seconds_ago: int) -> str:
@@ -300,7 +414,12 @@ def _rfc3339(seconds_ago: int) -> str:
 
 
 async def _compose_command(
-    ctx: JobContext, job: JobRecord, argv: list[str], *, timeout: float
+    ctx: JobContext,
+    job: JobRecord,
+    argv: list[str],
+    *,
+    timeout: float,
+    parse_full_output: bool = False,
 ) -> dict[str, Any]:
     if not _RUNTIME_LINUX:
         raise _unsupported("compose operations require the Linux target host")
@@ -324,6 +443,7 @@ async def _compose_command(
         "-f",
         compose_file,
     ]
+    max_bytes = ctx.config.main.output.log_result_max_bytes
     spec = ExecutionSpec(
         operation="compose",
         executable=resolve_toolchain(ctx.config.main.toolchain, "docker"),
@@ -333,9 +453,10 @@ async def _compose_command(
         profile=ExecutionProfile.RUNTIME_MANAGE,
         timeout_seconds=timeout,
         output_policy=OutputPolicyKind.TERMINATE,
-        max_output_bytes=ctx.config.main.output.log_result_max_bytes,
-        hard_output_limit=ctx.config.main.output.log_result_max_bytes,
+        max_output_bytes=max_bytes,
+        hard_output_limit=max_bytes,
         accepted_exit_codes=frozenset({0}),
+        summary_bytes=max_bytes if parse_full_output else 65536,
     )
     result = await ctx.process_manager.execute(spec)
     if not result.accepted:
@@ -407,56 +528,8 @@ async def _compose_prefix(ctx: JobContext, job: JobRecord) -> list[str]:
 
 async def _run_health_checks(ctx: JobContext, job: JobRecord) -> list[dict[str, Any]]:
     """Fixed health gates: consecutive successes inside the configured budget."""
-    import asyncio
-    from http.client import HTTPConnection
-    from urllib.parse import urlparse
-
     env_cfg = ctx.config.environment(job.app, job.environment)
-    results: list[dict[str, Any]] = []
-    for hc in env_cfg.health_checks:
-        parsed = urlparse(hc.url)
-        if parsed.scheme != "http":
-            raise DrawbridgeError(
-                f"health check URL must be http (no TLS in MVP): {hc.url!r}",
-                code=ErrorCode.CONFIG_INVALID,
-            )
-
-        def probe_once(parsed: Any = parsed, hc: Any = hc) -> int:
-            conn = HTTPConnection(
-                parsed.hostname, parsed.port or 80, timeout=hc.single_timeout_seconds
-            )
-            try:
-                conn.request("GET", parsed.path or "/", headers={"Host": parsed.netloc})
-                response = conn.getresponse()
-                response.read()
-                return response.status
-            finally:
-                conn.close()
-
-        deadline = time.monotonic() + hc.timeout_seconds
-        consecutive = 0
-        last_status: int | None = None
-        while time.monotonic() < deadline:
-            try:
-                last_status = await asyncio.to_thread(probe_once)
-            except OSError:
-                last_status = None
-            if last_status == hc.expected_status:
-                consecutive += 1
-                if consecutive >= hc.consecutive_successes:
-                    break
-            else:
-                consecutive = 0
-            await asyncio.sleep(hc.interval_seconds)
-        results.append(
-            {
-                "url": hc.url,
-                "passed": consecutive >= hc.consecutive_successes,
-                "last_status": last_status,
-                "consecutive_successes": consecutive,
-            }
-        )
-    return results
+    return await probe_health_checks(env_cfg.health_checks)
 
 
 async def run_npu_status(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
@@ -491,10 +564,108 @@ async def run_npu_status(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
 
 
 async def run_release_rollback(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
-    """Redeploy the target historical release's frozen artifacts."""
-    from drawbridge.runner.deploy import run_rollback
+    """Redeploy a historical release's frozen artifacts as a new release."""
+    runtime = ctx.runtime()
+    target = await ctx.store.get_release(str(job.params["release_id"]))
+    if target.app != job.app or target.environment != job.environment:
+        raise DrawbridgeError(
+            "release belongs to a different target", code=ErrorCode.INVALID_PARAMETER
+        )
+    if target.status not in ("succeeded", "rollback", "superseded"):
+        raise DrawbridgeError(
+            f"release {target.release_id} cannot be rolled back to "
+            f"(status {target.status})",
+            code=ErrorCode.INVALID_PARAMETER,
+        )
+    restore = await runtime.restore_to_release(job.app, job.environment, target)
 
-    return await run_rollback(ctx, job)
+    from drawbridge.state.store import new_id
+
+    now = time.time()
+    release = ReleaseRecord(
+        release_id=new_id(),
+        app=job.app,
+        environment=job.environment,
+        plan_id=None,
+        job_id=job.job_id,
+        commit_sha=target.commit_sha,
+        image_id=target.image_id,
+        image_tag=target.image_tag,
+        config_digest=ctx.config.digest,
+        status="rollback",
+        rollback_of=target.release_id,
+        compose_path=restore.get("compose_file"),
+        deploy_dir=ctx.config.environment(job.app, job.environment).deploy_root,
+        evidence={
+            "reason": job.params.get("reason"),
+            "restored_from": target.release_id,
+            "checks": restore.get("checks"),
+            "verified_at": now,
+        },
+        created_at=now,
+        verified_at=now,
+    )
+    await ctx.store.record_release(release)
+    await ctx.store.append_event(
+        "release_recorded",
+        job_id=job.job_id,
+        release_id=release.release_id,
+        app=job.app,
+        environment=job.environment,
+        request_id=job.request_id,
+        agent_id=job.agent_id,
+        detail={
+            "status": "rollback",
+            "rollback_of": target.release_id,
+            "image_id": target.image_id,
+        },
+    )
+    return {
+        "release_id": release.release_id,
+        "rollback_of": target.release_id,
+        "image_id": target.image_id,
+        "commit_sha": target.commit_sha,
+        "checks": restore.get("checks"),
+        "observed_at": now,
+    }
+
+
+async def run_test_suite(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
+    """Run one registered suite against the currently deployed release."""
+    runtime = ctx.runtime()
+    release = await ctx.store.get_release(str(job.params["release_id"]))
+    current = await ctx.store.get_current_release(job.app, job.environment)
+    if current is None or current.release_id != release.release_id:
+        raise DrawbridgeError(
+            "tests must target the currently deployed release",
+            code=ErrorCode.STALE_PLAN,
+        )
+    env_cfg = ctx.config.environment(job.app, job.environment)
+    suite_name = str(job.params["suite"])
+    suite = env_cfg.test_runner.get(suite_name)
+    if suite is None:
+        raise DrawbridgeError(
+            f"test suite {suite_name!r} is not registered",
+            code=ErrorCode.CONFIG_INVALID,
+        )
+    result = await runtime.run_test_container(
+        app=job.app, environment=job.environment, suite=suite, job_id=job.job_id
+    )
+    passed = result["exit_code"] == 0
+    payload: dict[str, Any] = {
+        "release_id": release.release_id,
+        "image_id": release.image_id,
+        "suite": suite_name,
+        "passed": passed,
+        **result,
+    }
+    if not passed:
+        raise DrawbridgeError(
+            "test suite failed: " + str(result.get("log_excerpt", ""))[:300],
+            code=ErrorCode.VERIFY_FAILED,
+            details=payload,
+        )
+    return payload
 
 
 #: Registry: action name → handler.  Fixed in code; configuration selects
@@ -513,6 +684,7 @@ HANDLERS: dict[str, Handler] = {
     "compose_logs": run_compose_logs,
     "npu_status": run_npu_status,
     "service_restart": run_service_restart,
+    "test_suite": run_test_suite,
     "release_rollback": run_release_rollback,
 }
 

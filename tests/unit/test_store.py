@@ -9,6 +9,7 @@ import pytest
 
 from drawbridge.errors import (
     BusyError,
+    DrawbridgeError,
     IdempotencyConflictError,
     RateLimitedError,
 )
@@ -418,3 +419,108 @@ class TestConcurrentAdmission:
 
 def test_new_id_shape() -> None:
     assert len(new_id()) == 36
+
+
+class TestTargetBlocking:
+    async def test_needs_attention_blocks_mutations_not_reads(self, store: Store) -> None:
+        first = await store.admit_job(
+            idempotency_key="blk-00000001", **BASE  # type: ignore[arg-type]
+        )
+        await store.finish_job(
+            first.job_id, status=JobStatus.NEEDS_ATTENTION, owner=None
+        )
+        with pytest.raises(DrawbridgeError) as exc:
+            await store.admit_job(
+                idempotency_key="blk-00000002", **BASE  # type: ignore[arg-type]
+            )
+        assert exc.value.code == "NEEDS_ATTENTION"
+        # diagnostics still admitted on the same target
+        diag = await store.admit_job(
+            kind=JobKind.DIAGNOSTIC,
+            action="host_metrics",
+            app="demo",
+            environment="staging",
+            params={},
+            idempotency_key=None,
+            config_digest="d" * 64,
+            queue_timeout_seconds=60,
+            deadline_seconds=60,
+            max_queued=50,
+            max_queued_per_target=5,
+        )
+        assert diag.status == JobStatus.QUEUED
+        # other targets unaffected
+        other = dict(BASE)
+        other["app"] = "orders"
+        other["idempotency_key"] = "blk-00000003"
+        assert (await store.admit_job(**other)).status == JobStatus.QUEUED  # type: ignore[arg-type]
+
+    async def test_reconcile_unblocks_target(self, store: Store) -> None:
+        base = {**BASE, "cooldown_seconds": 0}  # isolate from deploy cooldown
+        job = await store.admit_job(
+            idempotency_key="rec-00000001", **base  # type: ignore[arg-type]
+        )
+        await store.finish_job(job.job_id, status=JobStatus.ROLLBACK_FAILED)
+        with pytest.raises(DrawbridgeError):
+            await store.admit_job(
+                idempotency_key="rec-00000002", **base  # type: ignore[arg-type]
+            )
+        # operator-verified reconcile: resolve the blocking terminal status
+        async with store.db.write_lock():
+            await store.db.conn.execute(
+                "UPDATE jobs SET status = ? WHERE job_id = ?",
+                (JobStatus.FAILED, job.job_id),
+            )
+            await store.db.conn.commit()
+        assert (
+            await store.admit_job(
+                idempotency_key="rec-00000003", **base  # type: ignore[arg-type]
+            )
+        ).status == JobStatus.QUEUED
+
+
+class TestPlanDedupKeyBinding:
+    async def _plan(self, store: Store) -> str:
+        return (
+            await store.create_plan(
+                app="demo",
+                environment="staging",
+                workflow="deploy_verify",
+                source_mode="fetch",
+                git_ref="refs/heads/main",
+                commit_sha="a" * 40,
+                config_digest="d" * 64,
+                baseline_release_id=None,
+                ttl_seconds=900,
+                params={},
+            )
+        ).plan_id
+
+    async def test_new_key_binds_to_existing_plan_job(self, store: Store) -> None:
+        plan_id = await self._plan(store)
+        a = await store.admit_job(
+            idempotency_key="bind-aaaaaaa", plan_id=plan_id, **BASE  # type: ignore[arg-type]
+        )
+        b = await store.admit_job(
+            idempotency_key="bind-bbbbbbb", plan_id=plan_id, **BASE  # type: ignore[arg-type]
+        )
+        assert a.job_id == b.job_id
+        # the second key is now bound: reusing it with different content
+        # conflicts instead of creating a fresh job
+        divergent = dict(BASE)
+        divergent["params"] = {"git_ref": "refs/heads/other"}
+        divergent["idempotency_key"] = "bind-bbbbbbb"
+        with pytest.raises(IdempotencyConflictError):
+            await store.admit_job(**divergent)  # type: ignore[arg-type]
+
+    async def test_same_plan_divergent_content_conflicts(self, store: Store) -> None:
+        plan_id = await self._plan(store)
+        await store.admit_job(
+            idempotency_key="div-00000001", plan_id=plan_id, **BASE  # type: ignore[arg-type]
+        )
+        divergent = dict(BASE)
+        divergent["params"] = {"git_ref": "refs/heads/agent/other"}
+        divergent["idempotency_key"] = "div-00000002"
+        divergent["plan_id"] = plan_id
+        with pytest.raises(IdempotencyConflictError):
+            await store.admit_job(**divergent)  # type: ignore[arg-type]

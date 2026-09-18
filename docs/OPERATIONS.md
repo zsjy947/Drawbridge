@@ -15,14 +15,23 @@ sqlite3 /var/lib/drawbridge/state.db "SELECT job_id,kind,status,queued_at,finish
 
 ### 维护模式
 
-维护模式同时约束 Gateway 准入与 Runner 派发；只读工具不受影响：
+维护模式同时约束 Gateway 准入与 Runner 派发；只读工具不受影响。
+**推荐流程是配置驱动**（与 `drawbridge.yaml` 的 `maintenance.enabled` 一致）：
 
 ```bash
-sqlite3 /var/lib/drawbridge/state.db "INSERT OR REPLACE INTO control_state VALUES('maintenance','true',strftime('%s','now'));"
-# 只需重启 Gateway 即可让新请求立即被拒；Runner 每次派发前重查控制记录。
+# 进入维护：改配置后重启 Gateway，控制记录随启动同步
+sudo sed -i 's/^  enabled: .*/  enabled: true/' /etc/drawbridge/drawbridge.yaml   # maintenance 段
 sudo systemctl restart drawbridge-gateway
-# 恢复：
-sqlite3 /var/lib/drawbridge/state.db "UPDATE control_state SET value='false' WHERE key='maintenance';"
+# 退出维护：置回 false 并重启 Gateway
+```
+
+Gateway 启动时会把 `maintenance.enabled` 写入 `control_state` 控制记录；
+Runner 每次派发前重查该记录。紧急情况下也可以直接改库（等效于老流程）：
+
+```bash
+sudo -u drawbridge-gateway sqlite3 /var/lib/drawbridge/state.db \
+  "UPDATE control_state SET value='true' WHERE key='maintenance';"
+sudo systemctl restart drawbridge-gateway
 ```
 
 若控制记录不可读（IO 错误），Runner 停止一切派发（fail closed）；排队任务
@@ -55,20 +64,27 @@ sqlite3 /var/lib/drawbridge/state.db "UPDATE control_state SET value='false' WHE
 
 ## 3. NeedsAttention / RollbackFailed 的现场核实与 reconcile
 
-出现这两类状态时，该目标的**后续变更被阻止**（只读查询仍可用），没有远程
+出现这两类状态时，`admit` 会**拒绝该目标的一切新变更**（部署/测试/重启/
+回滚均返回 `NEEDS_ATTENTION`；只读查询与诊断不受影响），没有远程
 "强制忽略"开关。处理流程：
 
-1. 人工核实容器现场：`docker compose --project-name <project> ps`、
+1. 查明阻塞 job：`sqlite3 /var/lib/drawbridge/state.db "SELECT job_id,kind,status,finished_at FROM jobs WHERE status IN ('needs_attention','rollback_failed');"`
+2. 人工核实容器现场：`docker compose --project-name <project> ps`、
    `docker inspect`；比对当前运行镜像与 `releases` 表记录；
-2. 修复现场到已知状态（例如手工恢复到期望镜像）；
-3. 在本机（服务器上）执行受控 reconcile——把核实后的真实版本登记为基线：
+3. 修复现场到已知状态（例如手工恢复到期望镜像，或重新渲染
+   `deploy_root/compose.rendered.yaml` 指向期望镜像后 `compose up`）；
+4. 在本机（服务器上）执行受控 reconcile——把核实结论落到状态库，解除阻塞：
    ```bash
    sudo -u drawbridge-runner sqlite3 /var/lib/drawbridge/state.db \
-     "UPDATE jobs SET status='needs_attention' WHERE job_id='<id>';"
-   # 记录审计事件；随后解除目标封锁只能通过人工核对 + 新 plan 覆盖，
-   # 不提供任何绕过健康检查的远程参数。
+     "UPDATE jobs SET status='failed' WHERE job_id='<id>' AND status IN ('needs_attention','rollback_failed');"
+   # 同时追加审计事件（replace <id>/<结论>）：
+   sudo -u drawbridge-runner sqlite3 /var/lib/drawbridge/state.db \
+     "INSERT INTO events(ts,kind,job_id,detail_json) VALUES(strftime('%s','now'),'manual_reconcile','<id>','{\"conclusion\":\"<核实结论>\"}');"
    ```
-4. 事件表中记录了全过程的审计线索（append-only）。
+   解除后如需登记"当前实际运行版本"为新基线，用新的 `ops_release_plan` +
+   `ops_release_apply` 正常发布一次（它会如实记录镜像与验证证据）；
+   不提供任何绕过健康检查的远程参数。
+5. `events` 表是 append-only 的全过程审计线索。
 
 ## 4. Runner 重启约定
 

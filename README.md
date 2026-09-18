@@ -48,6 +48,14 @@ uv run mypy
 1. ✅ 配置编译器与受控执行器（严格类型、fullmatch、argv/环境、输出预算、进程组收尾）
 2. ✅ SQLite 任务/幂等/队列/锁/维护 + MCP HTTP 网关（IP 白名单、token、Origin/Host）
 3. ✅ Git plan（ref 解析/可达性/安全快照）与 deploy_verify 编排（恢复语义）
-4. 🔶 Compose/构建/测试在目标服务器落地：handler 已实现（Linux 才可运行），
-   systemd 单元、自检与示例应用已提供，需在 910B 上完成真实验收
+4. ✅ 发布闭环步骤执行器已按 MVP §5 实现（rootless BuildKit 构建、镜像导入/识别、
+   Compose 模板渲染更新、健康门禁、固定测试容器生命周期、恢复/显式回滚、
+   ops_test 与审计事件）——**Linux 目标机（910B）专用**：argv 构造以纯函数单测
+   覆盖，真实 BuildKit/Docker/Compose 执行需在目标服务器完成验收
+5. 🔶 待在 910B 上完成：真实示例应用的完整发布/回滚/漂移验收（MVP §10 清单）、
+   低权限 profile 账号隔离的落地实施（见 docs/PROFILES.md）
+
+注意：operations.yaml 中的 argv 模板目前仅用于参数 schema 声明与配置摘要冻结，
+实际 argv 在代码中固定（与 MVP §4/§5 一致）；管理员调整执行行为需修改代码并
+通过审核，而非仅改 YAML。
 

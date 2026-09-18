@@ -79,6 +79,9 @@ class GitClient:
             max_output_bytes=max_output_bytes,
             hard_output_limit=max_output_bytes,
             accepted_exit_codes=accepted,
+            # Parsing (ls-remote / show-ref / log) must see the complete
+            # bounded output, not a head+tail summary ring.
+            summary_bytes=max_output_bytes,
         )
         return await self._pm.execute(spec)
 

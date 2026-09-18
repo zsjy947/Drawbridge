@@ -141,3 +141,58 @@ def reject_symlink_components(root: str | Path, relative: str) -> Path:
     if not is_within_root(root_path, candidate):
         raise PermissionError(f"path escapes diagnostic root: {relative}")
     return candidate
+
+
+def _safe_relative_parts(relative: str) -> tuple[str, ...]:
+    pure = PurePosixPath(relative)
+    if not relative or pure.is_absolute() or relative.startswith("/"):
+        raise PermissionError(f"relative path expected, got {relative!r}")
+    if "\\" in relative or ":" in relative:
+        raise PermissionError(f"non-posix relative path: {relative!r}")
+    parts = pure.parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise PermissionError(f"path segments are not allowed: {relative!r}")
+    return parts
+
+
+def open_file_nofollow(root: str | Path, relative: str) -> int:
+    """Open ``root/relative`` refusing to traverse symlinks anywhere.
+
+    On POSIX this is the real thing: every component is opened with
+    ``O_NOFOLLOW`` relative to the parent's dirfd, and the final fd is
+    fstat-verified to be a regular file — there is no lstat/open race.
+    Windows dev hosts have no ``O_NOFOLLOW``; they fall back to the
+    lstat walk (:func:`reject_symlink_components`) plus a regular open.
+
+    Returns an ``O_RDONLY`` file descriptor; callers own it.
+    """
+    parts = _safe_relative_parts(relative)
+    if os.name == "posix":
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        fd = os.open(root, dir_flags)
+        try:
+            for part in parts[:-1]:
+                nxt = os.open(part, dir_flags | nofollow, dir_fd=fd)
+                os.close(fd)
+                fd = nxt
+            final = os.open(parts[-1], os.O_RDONLY | nofollow, dir_fd=fd)
+        except OSError:
+            os.close(fd)
+            raise
+        os.close(fd)
+        st = os.fstat(final)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(final)
+            raise PermissionError(f"not a regular file: {relative}")
+        return final
+
+    path = reject_symlink_components(root, relative)
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise PermissionError(f"not a regular file: {relative}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd

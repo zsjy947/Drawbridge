@@ -289,3 +289,31 @@ class TestSafeExtraction:
         archive = self._tar_with(tmp_path, add)
         with pytest.raises(UnsafeArchiveError, match="exceeds"):
             safe_extract_tar(archive, tmp_path / "out")
+
+
+class TestOutputParsingSeesFullBudget:
+    async def test_ls_remote_spec_carries_full_summary(
+        self, repos, git_path: str, repo_env: dict[str, str]
+    ) -> None:
+        """Parsing must see the complete bounded output, not a 64 KiB
+        head+tail ring (refs silently dropped from the middle)."""
+        from drawbridge.gitops import REMOTE_OUTPUT_LIMIT
+
+        seen: dict[str, object] = {}
+
+        class CapturingPM(ProcessManager):
+            async def execute(self, spec):  # type: ignore[no-untyped-def]
+                seen["spec"] = spec
+                return await super().execute(spec)
+
+        client = GitClient(
+            git_path=git_path,
+            repo_path=str(repos["clone"]),
+            env=repo_env,
+            process_manager=CapturingPM(),
+        )
+        refs = await client.enumerate_remote_refs()
+        assert refs  # origin advertises main + agent/fix-1
+        spec = seen["spec"]
+        assert spec.max_output_bytes == REMOTE_OUTPUT_LIMIT
+        assert spec.summary_bytes == REMOTE_OUTPUT_LIMIT

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from typing import Any
 
 from drawbridge.config.loader import load_config_from_dir
 from drawbridge.gateway.mcp_app import MCPAppFactory
@@ -31,6 +32,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+async def sync_maintenance_from_config(database: Any, config: Any) -> str:
+    """Persist ``maintenance.enabled`` into the control record (tech design §12).
+
+    Restarting the Gateway is the documented toggle: the config value is the
+    authority at startup, the Runner re-reads the control record before every
+    dispatch, and an unreadable record stops dispatch entirely (fail closed).
+    """
+    value = "true" if config.main.maintenance.enabled else "false"
+    await database.set_control("maintenance", value)
+    return value
+
+
 async def serve(config_dir: str, *, dev: bool = False) -> int:
     config = load_config_from_dir(config_dir)
     configure_logging(dev_mode=dev)
@@ -39,6 +52,9 @@ async def serve(config_dir: str, *, dev: bool = False) -> int:
     database = Database(f"{config.main.paths.state_dir}/state.db")
     await database.connect()
     await database.initialize()
+    maintenance = await sync_maintenance_from_config(database, config)
+    if maintenance == "true":
+        log.warning("maintenance mode is ENABLED; writes are rejected")
     store = Store(database)
     service = GatewayService(config, store)
     factory = MCPAppFactory(service)

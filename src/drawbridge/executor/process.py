@@ -59,6 +59,9 @@ class _StreamLedger:
         self._spool_fh: BinaryIO | None = None
         self._spool_error: str | None = None
         if spec.output_policy.value == "spool" and spec.log_path:
+            parent = os.path.dirname(spec.log_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             self._spool_fh = open(spec.log_path, "ab", buffering=0)  # noqa: SIM115
 
     def record(self, stream_name: str, chunk: bytes) -> None:
@@ -75,9 +78,16 @@ class _StreamLedger:
             if self.spec.output_policy.value == "spool"
             else self.spec.max_output_bytes
         )
-        if self.total_bytes > limit:
+        overflow = self.total_bytes - limit
+        if overflow >= len(chunk):
+            # Entire chunk beyond the budget: accounted, never kept.
             self.limit_exceeded = True
             return
+        if overflow > 0:
+            self.limit_exceeded = True
+            # Keep the deterministic prefix that still fits — chunk sizes
+            # vary by platform, the summary must not depend on them.
+            chunk = chunk[: len(chunk) - overflow]
 
         _append_ring(head, self._summary_half, chunk)
         _append_ring(tail, self._summary_half, chunk)

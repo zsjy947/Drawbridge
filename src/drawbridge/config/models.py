@@ -776,9 +776,20 @@ class DrawbridgeConfig(StrictModel):
 
     main: MainConfig
     apps: dict[str, AppConfig]
+    build_profiles: dict[str, BuildProfileConfig] = Field(default_factory=dict)
     operations: dict[str, OperationConfig]
     workflows: dict[str, WorkflowConfig]
     digest: str
+
+    def build_profile(self, name: str) -> BuildProfileConfig:
+        try:
+            return self.build_profiles[name]
+        except KeyError:
+            from drawbridge.errors import ConfigInvalidError
+
+            raise ConfigInvalidError(
+                f"build profile {name!r} is not registered in build_profiles"
+            ) from None
 
     def app(self, app_id: str) -> AppConfig:
         try:

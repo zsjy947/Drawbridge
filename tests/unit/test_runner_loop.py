@@ -212,3 +212,120 @@ class TestMutationSerialization:
         assert max_observed["value"] == 1  # max_running_jobs=1 by default
         statuses = [await store.get_job(j.job_id) for j in jobs]
         assert all(s.status == JobStatus.SUCCEEDED for s in statuses)
+
+
+async def admit_deploy(config, store: Store) -> Any:
+    """A deploy job bound to a fresh, valid plan for the demo app."""
+    plan = await store.create_plan(
+        app="demo",
+        environment="staging",
+        workflow="deploy_verify",
+        source_mode="fetch",
+        git_ref="refs/heads/main",
+        commit_sha="a" * 40,
+        config_digest=config.digest,
+        baseline_release_id=None,
+        ttl_seconds=900,
+        params={},
+    )
+    return await store.admit_job(
+        kind=JobKind.DEPLOY,
+        action="deploy_verify",
+        app="demo",
+        environment="staging",
+        params={"plan_id": plan.plan_id},
+        idempotency_key=f"deploy-{plan.plan_id[:8]}",
+        config_digest=config.digest,
+        queue_timeout_seconds=60,
+        deadline_seconds=60,
+        max_queued=50,
+        max_queued_per_target=5,
+        plan_id=plan.plan_id,
+    )
+
+
+class TestDeployJobTermination:
+    async def test_default_runtime_failure_terminates_job(self, setup) -> None:
+        """No mutation_handler injection: the default DeployRuntime refuses
+        off-target hosts and the job must land in a terminal state — the
+        stuck-in-running bug this replaces lost such failures."""
+        config, store = setup
+        runner = Runner(config, store)
+        job = await admit_deploy(config, store)
+        for _ in range(50):
+            current = await store.get_job(job.job_id)
+            if current.status in JobStatus.TERMINAL:
+                break
+            await runner._tick()
+            import asyncio
+
+            await asyncio.sleep(0.02)
+        current = await store.get_job(job.job_id)
+        assert current.status == JobStatus.FAILED
+        assert current.result is not None
+        assert current.result["error"]["code"] == "UNSUPPORTED"
+
+    async def test_unknown_workflow_terminates_job(self, setup) -> None:
+        config, store = setup
+        runner = Runner(config, store)
+        job = await admit(
+            store, kind=JobKind.DEPLOY, action="no_such_workflow", params={"plan_id": "x"}
+        )
+        for _ in range(50):
+            current = await store.get_job(job.job_id)
+            if current.status in JobStatus.TERMINAL:
+                break
+            await runner._tick()
+            import asyncio
+
+            await asyncio.sleep(0.02)
+        current = await store.get_job(job.job_id)
+        assert current.status == JobStatus.FAILED
+        assert current.result is not None
+        assert current.result["error"]["code"] == "CONFIG_INVALID"
+
+    async def test_cancelled_deploy_needs_attention(self, setup) -> None:
+        config, store = setup
+
+        async def slow_runtime(operation: str, state: Any, params: Any = None) -> dict:
+            import asyncio
+
+            await asyncio.sleep(30)
+            return {}
+
+        runner = Runner(config, store, mutation_handler=slow_runtime)
+        job = await admit_deploy(config, store)
+        await runner._tick()
+        import asyncio
+
+        for _ in range(100):
+            current = await store.get_job(job.job_id)
+            if current.status == JobStatus.RUNNING:
+                break
+            await asyncio.sleep(0.02)
+        assert (await store.get_job(job.job_id)).status == JobStatus.RUNNING
+
+        await runner.stop()
+        current = await store.get_job(job.job_id)
+        assert current.status == JobStatus.NEEDS_ATTENTION
+        assert current.result is not None
+        assert current.result["error"]["code"] == "NEEDS_ATTENTION"
+
+    async def test_job_finish_writes_audit_event(self, setup) -> None:
+        config, store = setup
+        runner = Runner(config, store)
+        job = await admit_deploy(config, store)
+        for _ in range(50):
+            current = await store.get_job(job.job_id)
+            if current.status in JobStatus.TERMINAL:
+                break
+            await runner._tick()
+            import asyncio
+
+            await asyncio.sleep(0.02)
+        async with store.db.conn.execute(
+            "SELECT kind, detail_json FROM events WHERE job_id = ?", (job.job_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        kinds = {row["kind"] for row in rows}
+        assert "job_finished" in kinds

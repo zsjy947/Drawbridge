@@ -88,12 +88,14 @@ class Database:
         return row["value"] if row is not None else None
 
     async def set_control(self, key: str, value: str) -> None:
+        import time
+
         async with self._write_lock:
             await self.conn.execute(
                 "INSERT INTO control_state(key, value, updated_at) VALUES(?, ?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
                 "updated_at = excluded.updated_at",
-                (key, value, _now()),
+                (key, value, time.time()),
             )
             await self.conn.commit()
 
@@ -102,9 +104,3 @@ class Database:
     def write_lock(self) -> asyncio.Lock:
         """Serialize multi-statement write transactions within this process."""
         return self._write_lock
-
-
-def _now() -> float:
-    import time
-
-    return time.time()
