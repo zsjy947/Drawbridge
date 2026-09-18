@@ -293,6 +293,40 @@ class TestAuditEvents:
             rows = await cursor.fetchall()
         assert rows and rows[0]["kind"] == "job_admitted"
 
+    async def test_public_write_without_job_kind_is_config_invalid(self, setup) -> None:
+        """A registered public write op MUST map to an explicit job kind;
+        silently defaulting to a restart would misroute the handler."""
+        service, _store, config = setup
+        from drawbridge.config.models import OperationConfig
+
+        config.operations["future_write_op"] = OperationConfig.model_validate(
+            {
+                "handler": "service_restart_and_verify",
+                "execution_profile": "runtime_manage",
+                "public": True,
+                "access": "runtime_write",
+                "timeout_seconds": 30,
+                "parameters": {
+                    "service": {
+                        "type": "string",
+                        "max_length": 64,
+                        "pattern": r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}",
+                        "validators": ["registered_restartable_service"],
+                    },
+                    "reason": {"type": "string", "min_length": 1, "max_length": 256},
+                },
+            }
+        )
+        with pytest.raises(DrawbridgeError, match="no registered job kind") as exc_info:
+            await service.ops_operation_run(
+                operation="future_write_op",
+                app="demo",
+                environment="staging",
+                parameters={"service": "api", "reason": "x"},
+                idempotency_key="future-00000001",
+            )
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID
+
 
 class TestMaintenanceSync:
     async def test_config_value_persisted_to_control_record(self, setup) -> None:
