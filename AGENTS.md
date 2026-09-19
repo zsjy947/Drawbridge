@@ -94,6 +94,14 @@ plans/ docs/   设计文档与运维手册
   尚无强制；不要在文档之外声称"已隔离"。
 - 依赖版本下限以实际使用的 SDK API 为准（当前 `mcp>=2.2`），升级前先在
   staging 跑全量 pytest 与自检。
+- `runtime.py::step_stop_initial` 在无已渲染 compose 文件时直接返回
+  `{"stopped": False}`，未做规格 §5 要求的"确认容器属于该 job"核对——首次
+  部署失败场景下风险低（项目名固定），但严格说核对缺失；补齐前不要声称
+  该路径已完成验收。
+- 维护模式是配置驱动：Gateway 启动会把 `maintenance.enabled` 覆盖进
+  控制记录。运维走 OPERATIONS.md §2 的"紧急改库"路径后，若 Gateway 意外
+  重启，紧急标志会被配置值清掉；在紧急路径文档补注"Gateway 重启会覆盖
+  此值"之前，救援操作不要依赖跨重启的紧急标志。
 
 ## 提交约定
 
