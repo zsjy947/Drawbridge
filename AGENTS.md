@@ -43,6 +43,7 @@ src/drawbridge/
   gateway/     service.py 工具编排与准入；mcp_app.py MCP 协议绑定；middleware.py 边缘
   runner/      loop.py 队列消费；deploy.py 工作流编排与恢复；runtime.py 生产步骤执行器；
                simulation.py simulation 适配器 + RuntimeSelector（按环境选择 adapter）；
+               retention.py 保留清理编排（幂等键/plans/终态 job/日志目录）；
                handlers.py 诊断/变更 handler 注册表；builtin.py 纯 Python 诊断；
                health.py 健康门禁；logpage.py 日志快照分页
   fsops.py     安全 tar 解包、no-follow 文件打开

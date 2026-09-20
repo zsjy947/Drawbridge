@@ -100,13 +100,36 @@ Runner 异常退出后 OS 锁自动释放，但**锁释放不等于旧任务已�
 
 ## 5. 保留与清理
 
-- 保留：当前 release、上一成功 release、回滚引用制品，永不清理；
-- 可清理：`retention.successful_releases`（默认 5）之外的历史制品与
-  `job_logs_days`（默认 7 天）前的 job 日志；清理只作用于登记目录与未引用
-  制品，**不删除卷，不执行全局 prune**；
-- 幂等键保留 7 天，过期后同键请求视为新请求；
+### 5.1 自动保留任务（Runner 内置）
+
+Runner 按 `drawbridge.yaml` 的 `retention.cleanup_interval_seconds`（默认
+1 小时）执行一次保留清理，单事务完成并写 `retention_cleanup` 审计事件：
+
+| 对象 | 保留期 | 说明 |
+|---|---|---|
+| 幂等键 | `retention.idempotency_key_days`（默认 7 天） | 过期后同键请求视为新请求 |
+| 过期 plans | `retention.plan_days`（默认 7 天） | 终态且超期的计划记录 |
+| 诊断 job 记录 | `diagnostics.retention_seconds`（默认 24h） | 含其 steps |
+| 其他终态 job 记录 | `retention.job_record_days`（默认 7 天） | **被 release 行引用的永不清理**；`rollback_failed`/`needs_attention` 永不清理（目标阻断语义优先） |
+| job spool 日志目录 | 随对应 job 记录删除 | `log_dir/<job_id>/` |
+
+**永不自动清理**：releases 与 artifacts 行（审计与回滚链）、events（只追加）、
+当前/上一成功/回滚引用的制品。镜像实体的回收仍属目标机人工操作——本任务不
+触碰 Docker、不删除卷、不执行全局 prune。
+
+### 5.2 历史查询
+
+`ops_history(app, environment, what=releases|jobs|events)` 提供有界（≤50 行）
+的目标历史：releases 视图带 `is_current` / `rollback_eligible` 标注，是回滚
+选版的工具入口；jobs 与 events 视图支持游标翻页。审计完整性不变——该工具
+只读取。
+
+### 5.3 磁盘预算
+
 - 磁盘达到 `disk_budget_bytes` 时拒绝新构建（`DISK_BUDGET_EXCEEDED`），
-  preflight 也会在低于保留空间时拒绝构建。
+  preflight 也会在低于保留空间时拒绝构建；
+- 可清理：`retention.successful_releases`（默认 5）之外的历史制品（人工，
+  按目标机 Docker 流程）。
 
 ## 6. 审计
 

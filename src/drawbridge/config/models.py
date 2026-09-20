@@ -754,6 +754,21 @@ class MaintenanceConfig(StrictModel):
     enabled: bool = False
 
 
+class RetentionPolicyConfig(StrictModel):
+    """Retention enforcement knobs (MVP spec §8 / OPERATIONS.md §5).
+
+    Diagnostic jobs keep using ``diagnostics.retention_seconds``; spooled
+    job log directories keep using each app's ``retention.job_logs_days``.
+    Release and artifact rows are audit history and are never deleted by
+    the automated cleanup.
+    """
+
+    cleanup_interval_seconds: int = Field(default=3600, ge=60, le=86400)
+    idempotency_key_days: int = Field(default=7, ge=1, le=365)
+    plan_days: int = Field(default=7, ge=1, le=365)
+    job_record_days: int = Field(default=7, ge=1, le=365)
+
+
 class MainConfig(StrictModel):
     schema_version: Literal[1]
     server: ServerConfig
@@ -765,13 +780,17 @@ class MainConfig(StrictModel):
     @classmethod
     def _coerce_profile_keys(cls, value: Any) -> Any:
         if isinstance(value, dict):
-            return {(ExecutionProfile(k) if isinstance(k, str) else k): v for k, v in value.items()}
+            return {
+                (ExecutionProfile(k) if isinstance(k, str) else k): v
+                for k, v in value.items()
+            }
         return value
 
     concurrency: ConcurrencyConfig = Field(default_factory=ConcurrencyConfig)
     diagnostics: DiagnosticsRuntimeConfig = Field(default_factory=DiagnosticsRuntimeConfig)
     output: OutputLimitsConfig = Field(default_factory=OutputLimitsConfig)
     maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
+    retention: RetentionPolicyConfig = Field(default_factory=RetentionPolicyConfig)
 
 
 # ---------------------------------------------------------------------------

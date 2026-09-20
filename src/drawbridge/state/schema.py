@@ -163,4 +163,7 @@ SCHEMA_STATEMENTS = (
     """
     CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_events_target ON events(app, environment, ts)
+    """,
 )

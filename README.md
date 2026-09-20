@@ -58,7 +58,10 @@ uv run drawbridge-simulate             # 无 systemd 的全链路通信测试（
 5. ✅ Simulation 运行时适配器与命令行通信测试（`drawbridge-simulate`）——
    plan/准入/队列/状态机/快照/渲染全部真实走通，容器动作记录模拟证据；
    Windows 开发机与 910B 均可运行（见 [docs/SIMULATION.md](docs/SIMULATION.md)）
-6. 🔶 待在 910B 上完成：真实示例应用的完整发布/回滚/漂移验收（MVP §10 清单）、
+6. ✅ 运维可见性与保留策略：`ops_history` 有界历史查询（releases/jobs/events，
+   回滚选版入口）+ Runner 内置保留清理任务（幂等键/plans/终态 job/日志目录；
+   见 [plans/OPTIMIZATION_A_OPERATIONAL_VISIBILITY.md](plans/OPTIMIZATION_A_OPERATIONAL_VISIBILITY.md)）
+7. 🔶 待在 910B 上完成：真实示例应用的完整发布/回滚/漂移验收（MVP §10 清单）、
    低权限 profile 账号隔离的落地实施（见 docs/PROFILES.md）
 
 注意：operations.yaml 中的 argv 模板目前仅用于参数 schema 声明与配置摘要冻结，

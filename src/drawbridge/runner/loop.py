@@ -70,6 +70,7 @@ class Runner:
         self._mutation_semaphore = asyncio.Semaphore(config.main.concurrency.max_running_jobs)
         self._running_mutations = 0
         self._tasks: set[asyncio.Task[None]] = set()
+        self._next_retention_at = time.monotonic() + config.main.retention.cleanup_interval_seconds
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -140,6 +141,8 @@ class Runner:
         if expired:
             log.info("expired queued jobs", count=expired)
 
+        await self._maybe_run_retention()
+
         maintenance = await self.store.db.get_control("maintenance")
         if maintenance is None:
             # Control record unreadable: fail closed, dispatch nothing.
@@ -166,6 +169,25 @@ class Runner:
         job = await self.store.claim_next_job(owner=self.instance_id, kinds=[JobKind.DIAGNOSTIC])
         if job is not None:
             self._spawn(self._run_diagnostic(job))
+
+    async def _maybe_run_retention(self) -> None:
+        """Throttled retention pass (OPERATIONS.md §5).
+
+        Runs before the maintenance gate on purpose: deleting expired
+        records is bookkeeping, not a mutation of any deployment target.
+        Failures never stop queue consumption — the next tick retries.
+        """
+        if time.monotonic() < self._next_retention_at:
+            return
+        self._next_retention_at = (
+            time.monotonic() + self.config.main.retention.cleanup_interval_seconds
+        )
+        try:
+            from drawbridge.runner.retention import run_retention
+
+            await run_retention(self.config, self.store)
+        except Exception as exc:
+            log.error("retention cleanup failed", error=str(exc))
 
     async def _cooldown_targets(self) -> dict[str, float]:
         """Targets whose deploy cooldown has not yet elapsed."""

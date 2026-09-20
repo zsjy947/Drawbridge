@@ -26,6 +26,7 @@ TOOL_NAMES = (
     "ops_catalog",
     "ops_status",
     "ops_logs",
+    "ops_history",
     "ops_release_plan",
     "ops_release_apply",
     "ops_release_status",
@@ -85,6 +86,27 @@ def build_tool_definitions() -> list[types.Tool]:
                     "limit": {"type": "integer", "minimum": 1, "maximum": 200},
                     "tail": {"type": "integer", "minimum": 1, "maximum": 1000},
                     "since_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+                },
+                ["app", "environment"],
+            ),
+        ),
+        types.Tool(
+            name="ops_history",
+            description=(
+                "Bounded target history: releases (with rollback eligibility), "
+                "recent jobs, or audit events. Use before rollback to pick a "
+                "release id."
+            ),
+            input_schema=_schema(
+                {
+                    "app": _str_schema("app id", 64),
+                    "environment": _str_schema("environment, e.g. staging", 64),
+                    "what": {
+                        "type": "string",
+                        "enum": ["releases", "jobs", "events"],
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "cursor": _str_schema("opaque pagination cursor", 64),
                 },
                 ["app", "environment"],
             ),
@@ -268,6 +290,14 @@ class MCPAppFactory:
                 limit=args.get("limit", 100),
                 tail=args.get("tail", 200),
                 since_seconds=args.get("since_seconds", 300),
+            )
+        if name == "ops_history":
+            return await svc.ops_history(
+                app=args["app"],
+                environment=args["environment"],
+                what=args.get("what", "releases"),
+                limit=args.get("limit", 50),
+                cursor=args.get("cursor"),
             )
         if name == "ops_release_plan":
             return await svc.ops_release_plan(

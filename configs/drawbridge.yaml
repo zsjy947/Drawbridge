@@ -62,3 +62,9 @@ output:
 
 maintenance:
   enabled: false
+
+retention:
+  cleanup_interval_seconds: 3600   # Runner retention pass cadence
+  idempotency_key_days: 7          # MVP spec §8: idempotency key retention
+  plan_days: 7                     # expired plans are removed after this
+  job_record_days: 7               # terminal job records (releases keep theirs)

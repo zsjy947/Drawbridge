@@ -183,6 +183,7 @@ class TestFunctionalFlows:
                 "ops_operation_run",
                 "ops_release_apply",
                 "ops_release_rollback",
+                "ops_history",
             } <= set(tools)
 
             result = await mcp.call(client, "ops_catalog", {})
@@ -190,6 +191,28 @@ class TestFunctionalFlows:
             ops = {o["name"] for o in result["data"]["operations"]}
             assert {"config_validate", "check_project_config", "config_read"} <= ops
             assert "release_preflight" not in ops  # internals stay hidden
+            # The catalog exposes each environment's runtime adapter.
+            apps = result["data"]["apps"]
+            assert apps["demo"]["runtimes"]["staging"] == "compose"
+
+    async def test_ops_history_over_http(self, gateway) -> None:
+        async with httpx.AsyncClient(timeout=20) as client:
+            mcp = MCPClient(gateway["url"])
+            result = await mcp.call(
+                client,
+                "ops_history",
+                {"app": "demo", "environment": "staging", "what": "jobs", "limit": 5},
+            )
+            assert not result["is_error"]
+            assert result["data"]["what"] == "jobs"
+
+            bad = await mcp.call(
+                client,
+                "ops_history",
+                {"app": "demo", "environment": "staging", "what": "secrets"},
+            )
+            assert bad["is_error"]
+            assert bad["code"] == "INVALID_PARAMETER"
 
     async def test_internal_operation_stays_forbidden(self, gateway) -> None:
         async with httpx.AsyncClient(timeout=20) as client:

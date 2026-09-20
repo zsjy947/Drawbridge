@@ -478,6 +478,59 @@ class Store:
             row = await cursor.fetchone()
         return row_to_job(row).to_public_dict() if row is not None else None
 
+    async def list_jobs(
+        self,
+        app: str,
+        environment: str,
+        *,
+        limit: int = 50,
+        before_queued_at: float | None = None,
+    ) -> list[JobRecord]:
+        """Newest-first bounded job history for one target."""
+        query = (
+            "SELECT * FROM jobs WHERE app = ? AND environment = ?"
+            " AND (? IS NULL OR queued_at < ?)"
+            " ORDER BY queued_at DESC LIMIT ?"
+        )
+        async with self.db.conn.execute(
+            query, (app, environment, before_queued_at, before_queued_at, limit)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [row_to_job(r) for r in rows]
+
+    async def list_events(
+        self,
+        app: str,
+        environment: str,
+        *,
+        limit: int = 50,
+        before_ts: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Newest-first bounded audit events for one target (read-only)."""
+        query = (
+            "SELECT id, ts, kind, request_id, job_id, release_id, agent_id,"
+            " detail_json FROM events WHERE app = ? AND environment = ?"
+            " AND (? IS NULL OR ts < ?)"
+            " ORDER BY ts DESC, id DESC LIMIT ?"
+        )
+        async with self.db.conn.execute(
+            query, (app, environment, before_ts, before_ts, limit)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            {
+                "id": r["id"],
+                "ts": r["ts"],
+                "kind": r["kind"],
+                "request_id": r["request_id"],
+                "job_id": r["job_id"],
+                "release_id": r["release_id"],
+                "agent_id": r["agent_id"],
+                "detail": loads(r["detail_json"]) or {},
+            }
+            for r in rows
+        ]
+
     async def heartbeat(self, job_id: str, owner: str, *, now: float | None = None) -> None:
         now = now if now is not None else time.time()
         async with self.db.write_lock():
@@ -730,3 +783,96 @@ class Store:
                 ),
             )
             await self.db.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Retention enforcement (single transaction; OPERATIONS.md §5)
+    # ------------------------------------------------------------------
+
+    async def retention_cleanup(
+        self,
+        *,
+        now: float,
+        idempotency_key_seconds: float,
+        plan_seconds: float,
+        diagnostic_job_seconds: float,
+        job_record_seconds: float,
+    ) -> dict[str, Any]:
+        """Delete expired records; never touches releases/artifacts/events.
+
+        Protected invariants: jobs referenced by releases and jobs in
+        blocking statuses (rollback_failed / needs_attention) are never
+        removed; idempotency keys and steps of a doomed job are removed
+        first so foreign keys stay satisfied.  Everything happens in one
+        ``BEGIN IMMEDIATE`` transaction.  Returns per-class counts and the
+        removed job ids (callers use them to drop spooled log dirs).
+        """
+        conn = self.db.conn
+        async with self.db.write_lock():
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await conn.execute(
+                    "DELETE FROM idempotency_keys WHERE created_at < ?",
+                    (now - idempotency_key_seconds,),
+                )
+                expired_keys = cursor.rowcount or 0
+
+                cursor = await conn.execute(
+                    "DELETE FROM plans WHERE expires_at < ?"
+                    " OR (status IN ('expired', 'rejected') AND created_at < ?)",
+                    (now - plan_seconds, now - plan_seconds),
+                )
+                expired_plans = cursor.rowcount or 0
+
+                # Terminal diagnostic jobs past the diagnostic retention.
+                diag_cutoff = now - diagnostic_job_seconds
+                cursor = await conn.execute(
+                    "SELECT job_id FROM jobs WHERE kind = ? AND finished_at < ?",
+                    (JobKind.DIAGNOSTIC, diag_cutoff),
+                )
+                doomed = [r["job_id"] for r in await cursor.fetchall()]
+
+                # Other terminal jobs past the record retention, unless a
+                # release references them or they block their target.
+                placeholders = ",".join("?" * len(JobStatus.TERMINAL))
+                blocking = ",".join("?" * len(BLOCKING_STATUSES))
+                cursor = await conn.execute(
+                    "SELECT j.job_id FROM jobs j WHERE j.status IN (" + placeholders + ")"  # noqa: S608
+                    " AND j.kind != ? AND j.finished_at < ?"
+                    " AND j.status NOT IN (" + blocking + ")"
+                    " AND NOT EXISTS (SELECT 1 FROM releases r WHERE r.job_id = j.job_id)",
+                    (
+                        *JobStatus.TERMINAL,
+                        JobKind.DIAGNOSTIC,
+                        now - job_record_seconds,
+                        *BLOCKING_STATUSES,
+                    ),
+                )
+                doomed.extend(r["job_id"] for r in await cursor.fetchall())
+
+                removed_steps = 0
+                removed_keys = 0
+                removed_jobs = 0
+                for job_id in doomed:
+                    cursor = await conn.execute(
+                        "DELETE FROM steps WHERE job_id = ?", (job_id,)
+                    )
+                    removed_steps += cursor.rowcount or 0
+                    cursor = await conn.execute(
+                        "DELETE FROM idempotency_keys WHERE job_id = ?", (job_id,)
+                    )
+                    removed_keys += cursor.rowcount or 0
+                    cursor = await conn.execute(
+                        "DELETE FROM jobs WHERE job_id = ?", (job_id,)
+                    )
+                    removed_jobs += cursor.rowcount or 0
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+        return {
+            "idempotency_keys": expired_keys + removed_keys,
+            "plans": expired_plans,
+            "jobs": removed_jobs,
+            "steps": removed_steps,
+            "removed_job_ids": doomed,
+        }

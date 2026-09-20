@@ -273,6 +273,10 @@ class GatewayService:
                     env: env_cfg.services
                     for env, env_cfg in app_cfg.environments.items()
                 },
+                "runtimes": {
+                    env: env_cfg.runtime
+                    for env, env_cfg in app_cfg.environments.items()
+                },
             }
         return {
             "request_id": request_id,
@@ -606,6 +610,96 @@ class GatewayService:
             }
         raise UnknownJobError("provide job_id or release_id")
 
+    async def ops_history(
+        self,
+        app: str,
+        environment: str,
+        what: str = "releases",
+        limit: Any = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Bounded target history: releases / jobs / audit events.
+
+        Direct bounded SQLite reads — the same class as ops_release_status
+        (no side effects, no host commands); the Runner diagnostic channel
+        stays reserved for operations that execute something.
+        """
+        request_id = self._request_id()
+        self._env_cfg(app, environment)
+        if what not in ("releases", "jobs", "events"):
+            raise InvalidParameterError(
+                "what must be one of releases, jobs, events"
+            )
+        if isinstance(limit, bool) or not isinstance(limit, int) or not (
+            1 <= limit <= 50
+        ):
+            raise InvalidParameterError("limit must be an integer between 1 and 50")
+        page_size = limit + 1  # fetch one extra row to detect the next page
+
+        if what == "releases":
+            releases = await self.store.list_releases(app, environment, limit=page_size)
+            has_more = len(releases) > limit
+            releases = releases[:limit]
+            current = await self.store.get_current_release(app, environment)
+            current_id = current.release_id if current else None
+            rows = []
+            for release in releases:
+                rows.append(
+                    {
+                        "release_id": release.release_id,
+                        "commit_sha": release.commit_sha,
+                        "image_id": release.image_id,
+                        "status": release.status,
+                        "created_at": release.created_at,
+                        "rollback_of": release.rollback_of,
+                        "is_current": release.release_id == current_id,
+                        "rollback_eligible": (
+                            release.status in ("succeeded", "rollback", "superseded")
+                            and release.release_id != current_id
+                        ),
+                    }
+                )
+            next_cursor = str(releases[-1].created_at) if has_more and releases else None
+            return {
+                "request_id": request_id,
+                "status": "ok",
+                "data": {"what": "releases", "releases": rows, "next_cursor": next_cursor},
+            }
+
+        if what == "jobs":
+            before: float | None = None
+            if cursor is not None:
+                before = _parse_history_cursor(cursor)
+            jobs = await self.store.list_jobs(
+                app, environment, limit=page_size, before_queued_at=before
+            )
+            has_more = len(jobs) > limit
+            jobs = jobs[:limit]
+            rows = [job.to_public_dict() for job in jobs]
+            next_cursor = (
+                str(jobs[-1].queued_at) if has_more and jobs else None
+            )
+            return {
+                "request_id": request_id,
+                "status": "ok",
+                "data": {"what": "jobs", "jobs": rows, "next_cursor": next_cursor},
+            }
+
+        before_ts: float | None = None
+        if cursor is not None:
+            before_ts = _parse_history_cursor(cursor)
+        events = await self.store.list_events(
+            app, environment, limit=page_size, before_ts=before_ts
+        )
+        has_more = len(events) > limit
+        events = events[:limit]
+        next_cursor = str(events[-1]["ts"]) if has_more and events else None
+        return {
+            "request_id": request_id,
+            "status": "ok",
+            "data": {"what": "events", "events": events, "next_cursor": next_cursor},
+        }
+
     async def ops_service_restart(
         self,
         app: str,
@@ -716,6 +810,17 @@ def _release_summary(release: Any) -> dict[str, Any] | None:
         "created_at": release.created_at,
         "rollback_of": release.rollback_of,
     }
+
+
+def _parse_history_cursor(cursor: str) -> float:
+    """History cursors are opaque timestamps of the last row seen."""
+    try:
+        value = float(cursor)
+    except ValueError:
+        raise InvalidParameterError("cursor is not a valid history cursor") from None
+    if not 0 <= value <= 4102444800:  # up to 2100-01-01
+        raise InvalidParameterError("cursor is not a valid history cursor")
+    return value
 
 
 def _param_schemas(op: OperationConfig) -> dict[str, Any]:
