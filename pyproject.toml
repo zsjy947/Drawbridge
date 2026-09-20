@@ -20,6 +20,7 @@ dependencies = [
 drawbridge-gateway = "drawbridge.entries.gateway_main:main"
 drawbridge-runner = "drawbridge.entries.runner_main:main"
 drawbridge-selfcheck = "drawbridge.entries.selfcheck_main:main"
+drawbridge-simulate = "drawbridge.entries.simulate_main:main"
 
 [dependency-groups]
 dev = [

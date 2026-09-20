@@ -22,8 +22,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="drawbridge-runner")
     parser.add_argument("--config-dir", default="/etc/drawbridge")
     parser.add_argument("--dev", action="store_true")
+    parser.add_argument("--poll-interval", type=float, default=0.2, help="queue poll interval (s)")
     parser.add_argument(
-        "--poll-interval", type=float, default=0.2, help="queue poll interval (s)"
+        "--once",
+        action="store_true",
+        help="run a single queue tick and exit (no systemd / foreground use)",
+    )
+    parser.add_argument(
+        "--drain",
+        action="store_true",
+        help="keep ticking until the queue is idle, then exit",
+    )
+    parser.add_argument(
+        "--drain-timeout",
+        type=float,
+        default=1800.0,
+        help="upper bound for --drain in seconds (default: 1800)",
     )
     return parser
 
@@ -48,7 +62,15 @@ def acquire_instance_lock(lock_path: Path) -> object | None:
 _RUNTIME_WINDOWS = sys.platform == "win32"
 
 
-async def run(config_dir: str, *, dev: bool, poll_interval: float) -> int:
+async def run(
+    config_dir: str,
+    *,
+    dev: bool,
+    poll_interval: float,
+    once: bool = False,
+    drain: bool = False,
+    drain_timeout: float = 1800.0,
+) -> int:
     config = load_config_from_dir(config_dir)
     configure_logging(dev_mode=dev)
     log = get_logger("drawbridge.runner")
@@ -67,9 +89,15 @@ async def run(config_dir: str, *, dev: bool, poll_interval: float) -> int:
         "runner consuming queue",
         instance=runner.instance_id,
         config_digest=config.digest[:12],
+        mode=("once" if once else "drain" if drain else "forever"),
     )
     try:
-        await runner.run_forever()
+        if once:
+            await runner.tick_once()
+        elif drain:
+            await runner.run_until_idle(timeout=drain_timeout)
+        else:
+            await runner.run_forever()
     finally:
         await database.close()
     return 0
@@ -78,7 +106,16 @@ async def run(config_dir: str, *, dev: bool, poll_interval: float) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     try:
-        return asyncio.run(run(args.config_dir, dev=args.dev, poll_interval=args.poll_interval))
+        return asyncio.run(
+            run(
+                args.config_dir,
+                dev=args.dev,
+                poll_interval=args.poll_interval,
+                once=args.once,
+                drain=args.drain,
+                drain_timeout=args.drain_timeout,
+            )
+        )
     except KeyboardInterrupt:
         return 0
     except Exception as exc:

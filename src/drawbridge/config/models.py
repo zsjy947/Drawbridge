@@ -31,6 +31,20 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_valida
 _ID_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 _SERVICE_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}")
 _ASCII_ONLY = re.compile(r"^[\x20-\x7e]+$")
+#: Windows drive-absolute path (development/simulation hosts only; the
+#: 910B deployment always uses POSIX absolute paths).
+_WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/].*")
+
+
+def _is_absolute_path(value: str) -> bool:
+    """Accept POSIX absolute paths and, on development hosts, drive letters.
+
+    Production configs on the Linux target are unaffected; the drive-letter
+    form exists so simulation bundles can be expressed as YAML on the
+    Windows machines used for development and communication testing.
+    """
+    return value.startswith("/") or _WINDOWS_ABSOLUTE.fullmatch(value) is not None
+
 
 #: Maximum length of an administrator-supplied regular expression.
 MAX_PATTERN_LENGTH = 1024
@@ -105,9 +119,7 @@ def _enum_coercer(enum_class: type[StrEnum_]) -> Any:
             try:
                 return enum_class(value)
             except ValueError as exc:
-                raise ValueError(
-                    f"{value!r} is not a valid {enum_class.__name__}"
-                ) from exc
+                raise ValueError(f"{value!r} is not a valid {enum_class.__name__}") from exc
         return value
 
     return _coerce
@@ -514,7 +526,7 @@ class NpuConfig(StrictModel):
 
 
 class EnvironmentConfig(StrictModel):
-    runtime: Literal["compose"]
+    runtime: Literal["compose", "simulation"]
     project_name: str = Field(pattern=_SERVICE_RE.pattern)
     build_profile: str = Field(pattern=_ID_RE.pattern)
     buildkit_socket: str = ""
@@ -651,7 +663,7 @@ class ToolchainConfig(StrictModel):
     @field_validator("git", "docker", "ps", "buildctl")
     @classmethod
     def _absolute(cls, value: str) -> str:
-        if not value.startswith("/"):
+        if not _is_absolute_path(value):
             raise ValueError("toolchain paths must be absolute")
         return check_no_control_chars(value, field="toolchain path")
 
@@ -733,7 +745,7 @@ class PathsConfig(StrictModel):
     @field_validator("state_dir", "lock_dir", "log_dir", "config_dir")
     @classmethod
     def _absolute(cls, value: str) -> str:
-        if not value.startswith("/"):
+        if not _is_absolute_path(value):
             raise ValueError("paths must be absolute")
         return check_no_control_chars(value, field="path")
 
@@ -747,19 +759,15 @@ class MainConfig(StrictModel):
     server: ServerConfig
     paths: PathsConfig = Field(default_factory=PathsConfig)
     toolchain: ToolchainConfig = Field(default_factory=ToolchainConfig)
-    profile_env: dict[ExecutionProfile, ProfileEnvConfig] = Field(
-        default_factory=dict
-    )
+    profile_env: dict[ExecutionProfile, ProfileEnvConfig] = Field(default_factory=dict)
 
     @field_validator("profile_env", mode="before")
     @classmethod
     def _coerce_profile_keys(cls, value: Any) -> Any:
         if isinstance(value, dict):
-            return {
-                (ExecutionProfile(k) if isinstance(k, str) else k): v
-                for k, v in value.items()
-            }
+            return {(ExecutionProfile(k) if isinstance(k, str) else k): v for k, v in value.items()}
         return value
+
     concurrency: ConcurrencyConfig = Field(default_factory=ConcurrencyConfig)
     diagnostics: DiagnosticsRuntimeConfig = Field(default_factory=DiagnosticsRuntimeConfig)
     output: OutputLimitsConfig = Field(default_factory=OutputLimitsConfig)
@@ -797,9 +805,7 @@ class DrawbridgeConfig(StrictModel):
         except KeyError:
             from drawbridge.errors import DrawbridgeError, ErrorCode
 
-            raise DrawbridgeError(
-                f"unknown app {app_id!r}", code=ErrorCode.UNKNOWN_APP
-            ) from None
+            raise DrawbridgeError(f"unknown app {app_id!r}", code=ErrorCode.UNKNOWN_APP) from None
 
     def environment(self, app_id: str, environment: str) -> EnvironmentConfig:
         app = self.app(app_id)

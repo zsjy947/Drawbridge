@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from drawbridge.config.models import DrawbridgeConfig
-from drawbridge.errors import DrawbridgeError
+from drawbridge.errors import DrawbridgeError, ErrorCode
 from drawbridge.executor.process import ProcessManager
 from drawbridge.logsetup import get_logger
 from drawbridge.state.locking import TargetLocks
@@ -54,9 +54,9 @@ class Runner:
         )
         self.process_manager = ProcessManager()
         if mutation_handler is None:
-            from drawbridge.runner.runtime import DeployRuntime
+            from drawbridge.runner.simulation import build_runtime
 
-            mutation_handler = DeployRuntime(
+            mutation_handler = build_runtime(
                 config=self.config,
                 store=self.store,
                 process_manager=self.process_manager,
@@ -85,6 +85,15 @@ class Runner:
                 await asyncio.sleep(1.0)
             await asyncio.sleep(self.poll_interval)
 
+    async def tick_once(self) -> None:
+        """One admission-limited queue pass, then settle in-flight jobs.
+
+        Public single-step contract for ``drawbridge-runner --once`` and
+        no-systemd command-line operation.
+        """
+        await self._tick()
+        await self.drain()
+
     async def stop(self) -> None:
         self._stopping.set()
         for task in list(self._tasks):
@@ -96,6 +105,35 @@ class Runner:
         """Wait for all in-flight job tasks (tests and graceful shutdown)."""
         while self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
+    async def run_until_idle(self, *, timeout: float = 300.0) -> int:
+        """Tick until no queued or running jobs remain; returns jobs handled.
+
+        Bounded single-purpose entry for command-line operation without
+        systemd (``drawbridge-runner --drain`` and drawbridge-simulate):
+        the loop keeps the normal admission/lock/maintenance semantics and
+        simply stops once the queue is empty and in-flight tasks settled.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            await self._tick()
+            await self.drain()
+            pending = await self._pending_jobs()
+            if pending == 0:
+                return 0
+            if time.monotonic() >= deadline:
+                raise DrawbridgeError(
+                    f"queue still has {pending} pending job(s) after {timeout:.0f}s",
+                    code=ErrorCode.TIMEOUT,
+                )
+            await asyncio.sleep(self.poll_interval)
+
+    async def _pending_jobs(self) -> int:
+        async with self.store.db.conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE status IN ('queued', 'running')"
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row["n"]) if row is not None else 0
 
     async def _tick(self) -> None:
         expired = await self.store.expire_stale_queue()
@@ -125,9 +163,7 @@ class Runner:
             if job is not None:
                 self._running_mutations += 1
                 self._spawn(self._run_mutation(job))
-        job = await self.store.claim_next_job(
-            owner=self.instance_id, kinds=[JobKind.DIAGNOSTIC]
-        )
+        job = await self.store.claim_next_job(owner=self.instance_id, kinds=[JobKind.DIAGNOSTIC])
         if job is not None:
             self._spawn(self._run_diagnostic(job))
 

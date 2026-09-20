@@ -3,6 +3,9 @@
 面向在 910B 服务器上运维 Drawbridge 的管理员。所有命令假定配置位于
 `/etc/drawbridge`。
 
+> 无 systemd 环境或开发机上，Runner 可用 `--once`（单步）/`--drain`（排空）
+> 前台运行；通信链路的命令行验证见 [SIMULATION.md](SIMULATION.md)。
+
 ## 1. 日常操作
 
 ### 查看状态

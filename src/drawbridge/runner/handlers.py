@@ -13,6 +13,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC
+from pathlib import Path
 from typing import Any
 
 from drawbridge.config.models import DrawbridgeConfig
@@ -95,21 +96,23 @@ class JobContext:
         )
 
     def runtime(self) -> Any:
-        """The production DeployRuntime (target-host step executor)."""
-        from drawbridge.runner.runtime import DeployRuntime
+        """The runtime adapter stack (compose or simulation per target)."""
+        from drawbridge.runner.simulation import build_runtime
 
-        return DeployRuntime(
+        return build_runtime(
             config=self.config,
             store=self.store,
             process_manager=self.process_manager,
             log_dir=self.log_dir,
         )
 
+    def runtime_mode(self, app_id: str, environment: str) -> str:
+        """Configured runtime adapter for one target (compose|simulation)."""
+        return self.config.environment(app_id, environment).runtime
+
 
 def _unsupported(platform_note: str) -> DrawbridgeError:
-    return DrawbridgeError(
-        platform_note, code=ErrorCode.UNSUPPORTED
-    )
+    return DrawbridgeError(platform_note, code=ErrorCode.UNSUPPORTED)
 
 
 async def run_release_plan(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
@@ -191,13 +194,10 @@ async def run_git_status(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
 
 async def run_git_log(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
     client = ctx.git_client(job.app)
-    entries = await client.log(
-        job.params["git_ref"], count=int(job.params.get("count", 20))
-    )
+    entries = await client.log(job.params["git_ref"], count=int(job.params.get("count", 20)))
     return {
         "commits": [
-            {"sha": e.sha, "commit_time": e.commit_time, "subject": e.subject}
-            for e in entries
+            {"sha": e.sha, "commit_time": e.commit_time, "subject": e.subject} for e in entries
         ],
         "observed_at": time.time(),
     }
@@ -208,9 +208,7 @@ async def run_host_metrics(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
 
 
 async def run_config_read(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
-    return handle_config_read(
-        ctx.builtin_context(job.app, job.environment), job.params["file"]
-    )
+    return handle_config_read(ctx.builtin_context(job.app, job.environment), job.params["file"])
 
 
 async def run_project_list(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
@@ -224,9 +222,7 @@ async def run_project_list(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
 async def run_config_validate(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
     from drawbridge.runner.builtin import handle_config_validate
 
-    return handle_config_validate(
-        ctx.builtin_context(job.app, job.environment), job.params["file"]
-    )
+    return handle_config_validate(ctx.builtin_context(job.app, job.environment), job.params["file"])
 
 
 async def run_check_project_config(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
@@ -245,9 +241,7 @@ async def run_check_project_config(ctx: JobContext, job: JobRecord) -> dict[str,
         executable="/bin/bash",
         argv=("--noprofile", "--norc", script),
         cwd=cwd,
-        env=build_environment(
-            ExecutionProfile.PROJECT_DIAGNOSTIC, ctx.config.main.profile_env
-        ),
+        env=build_environment(ExecutionProfile.PROJECT_DIAGNOSTIC, ctx.config.main.profile_env),
         profile=ExecutionProfile.PROJECT_DIAGNOSTIC,
         timeout_seconds=15,
         output_policy=OutputPolicyKind.TERMINATE,
@@ -287,9 +281,7 @@ async def run_process_list(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
     )
     result = await ctx.process_manager.execute(spec)
     if not result.accepted:
-        raise DrawbridgeError(
-            f"ps failed: {result.stderr_preview[:200]}", code=ErrorCode.INTERNAL
-        )
+        raise DrawbridgeError(f"ps failed: {result.stderr_preview[:200]}", code=ErrorCode.INTERNAL)
     lines = [line for line in result.stdout_preview.splitlines() if line.strip()]
     return {
         "head": lines[0] if lines else "",
@@ -300,9 +292,25 @@ async def run_process_list(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
 
 async def run_compose_status(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
     """Fixed compose ps via the runtime_manage profile (Linux target)."""
-    return await _compose_command(
-        ctx, job, ["ps", "--all", "--format", "json"], timeout=15
-    )
+    if ctx.runtime_mode(job.app, job.environment) == "simulation":
+        return await _simulation_compose_status(ctx, job)
+    return await _compose_command(ctx, job, ["ps", "--all", "--format", "json"], timeout=15)
+
+
+async def _simulation_compose_status(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
+    """Bounded service view of a simulated release (whitelisted fields)."""
+    env_cfg = ctx.config.environment(job.app, job.environment)
+    release = await ctx.store.get_current_release(job.app, job.environment)
+    rows = [
+        {
+            "service": service,
+            "state": "running" if release is not None else "created",
+            "health": "simulated" if release is not None else None,
+            "image": release.image_id if release is not None else None,
+        }
+        for service in env_cfg.services
+    ]
+    return {"services": rows, "simulated": True, "observed_at": time.time()}
 
 
 async def run_compose_logs(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
@@ -330,9 +338,7 @@ async def run_compose_logs(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
         try:
             snapshot_id, snapshot, offset = _LOG_CACHE.resolve(cursor)
         except UnknownCursorError as exc:
-            raise DrawbridgeError(
-                str(exc), code=ErrorCode.INVALID_PARAMETER
-            ) from exc
+            raise DrawbridgeError(str(exc), code=ErrorCode.INVALID_PARAMETER) from exc
         page = paginate_lines(
             snapshot.lines,
             query=query,
@@ -342,21 +348,58 @@ async def run_compose_logs(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
         )
         return _log_page(page, snapshot_id, False, observed_at)
 
-    argv = [
-        "logs",
-        "--no-color",
-        "--timestamps",
-        "--tail",
-        str(tail),
-        "--since",
-        _rfc3339(since),
-    ]
-    if service:
-        argv.append(service)
-    fetched = await _compose_command(
-        ctx, job, argv, timeout=15, parse_full_output=True
+    if ctx.runtime_mode(job.app, job.environment) == "simulation":
+        lines = _simulation_log_lines(ctx, job, tail)
+        fetch_truncated = False
+    else:
+        argv = [
+            "logs",
+            "--no-color",
+            "--timestamps",
+            "--tail",
+            str(tail),
+            "--since",
+            _rfc3339(since),
+        ]
+        if service:
+            argv.append(service)
+        fetched = await _compose_command(ctx, job, argv, timeout=15, parse_full_output=True)
+        lines = [line for line in fetched["stdout_preview"].splitlines() if line.strip()]
+        fetch_truncated = bool(fetched["truncated"])
+    return _paged_log_result(ctx, lines, query, limit, fetch_truncated, observed_at)
+
+
+def _simulation_log_lines(ctx: JobContext, job: JobRecord, tail: int) -> list[str]:
+    """Bounded read of the synthetic application log of a simulated release."""
+    from drawbridge.runner.simulation import SIMULATION_LOG_NAME
+
+    env_cfg = ctx.config.environment(job.app, job.environment)
+    log_file = Path(env_cfg.deploy_root) / SIMULATION_LOG_NAME
+    if not log_file.is_file():
+        return []
+    max_bytes = ctx.config.main.output.log_result_max_bytes
+    try:
+        raw = log_file.read_bytes()
+    except OSError:
+        return []
+    truncated = len(raw) > max_bytes
+    text = (
+        raw[-max_bytes:].decode("utf-8", errors="replace")
+        if truncated
+        else raw.decode("utf-8", errors="replace")
     )
-    lines = [line for line in fetched["stdout_preview"].splitlines() if line.strip()]
+    lines = [line for line in text.splitlines() if line.strip()]
+    return lines[-tail:]
+
+
+def _paged_log_result(
+    ctx: JobContext,
+    lines: list[str],
+    query: str,
+    limit: int,
+    fetch_truncated: bool,
+    observed_at: float,
+) -> dict[str, Any]:
     snapshot_id = _LOG_CACHE.create(lines)
     page = paginate_lines(
         lines,
@@ -365,7 +408,7 @@ async def run_compose_logs(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
         limit=limit,
         max_bytes=ctx.config.main.output.log_result_max_bytes,
     )
-    return _log_page(page, snapshot_id, bool(fetched["truncated"]), observed_at)
+    return _log_page(page, snapshot_id, fetch_truncated, observed_at)
 
 
 def _log_page(
@@ -381,18 +424,14 @@ def _log_page(
         "snapshot_total": page["snapshot_total"],
         "truncated": page["truncated"],
         "fetch_truncated": fetch_truncated,
-        "next_cursor": (
-            f"{snapshot_id}:{next_offset}" if next_offset is not None else None
-        ),
+        "next_cursor": (f"{snapshot_id}:{next_offset}" if next_offset is not None else None),
         "observed_at": observed_at,
     }
 
 
 def _bounded_int(value: Any, minimum: int, maximum: int, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise DrawbridgeError(
-            f"{name} must be an integer", code=ErrorCode.INVALID_PARAMETER
-        )
+        raise DrawbridgeError(f"{name} must be an integer", code=ErrorCode.INVALID_PARAMETER)
     if not (minimum <= value <= maximum):
         raise DrawbridgeError(
             f"{name} must be between {minimum} and {maximum}",
@@ -408,9 +447,7 @@ def _has_control_chars(value: str) -> bool:
 def _rfc3339(seconds_ago: int) -> str:
     from datetime import datetime, timedelta
 
-    return (datetime.now(tz=UTC) - timedelta(seconds=seconds_ago)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    return (datetime.now(tz=UTC) - timedelta(seconds=seconds_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 async def _compose_command(
@@ -473,17 +510,27 @@ async def _compose_command(
 
 async def run_service_restart(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
     """Restart one registered service, then run its health gate."""
-    if not _RUNTIME_LINUX:
-        raise _unsupported("service restart requires the Linux target host")
-    from drawbridge.config.models import ExecutionProfile, OutputPolicyKind
-    from drawbridge.executor.spec import ExecutionSpec
-
     env_cfg = ctx.config.environment(job.app, job.environment)
     service = job.params["service"]
     if service not in env_cfg.restartable_services:
         raise DrawbridgeError(
             f"service {service!r} is not restartable", code=ErrorCode.INVALID_PARAMETER
         )
+    if ctx.runtime_mode(job.app, job.environment) == "simulation":
+        from drawbridge.runner.simulation import simulation_checks
+
+        health = simulation_checks(env_cfg)
+        return {
+            "restarted": service,
+            "health": health,
+            "simulated": True,
+            "observed_at": time.time(),
+        }
+    if not _RUNTIME_LINUX:
+        raise _unsupported("service restart requires the Linux target host")
+    from drawbridge.config.models import ExecutionProfile, OutputPolicyKind
+    from drawbridge.executor.spec import ExecutionSpec
+
     prefix = await _compose_prefix(ctx, job)
     spec = ExecutionSpec(
         operation="service_restart",
@@ -573,8 +620,7 @@ async def run_release_rollback(ctx: JobContext, job: JobRecord) -> dict[str, Any
         )
     if target.status not in ("succeeded", "rollback", "superseded"):
         raise DrawbridgeError(
-            f"release {target.release_id} cannot be rolled back to "
-            f"(status {target.status})",
+            f"release {target.release_id} cannot be rolled back to (status {target.status})",
             code=ErrorCode.INVALID_PARAMETER,
         )
     restore = await runtime.restore_to_release(job.app, job.environment, target)

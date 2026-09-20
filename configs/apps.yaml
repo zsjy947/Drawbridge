@@ -22,7 +22,7 @@ apps:
       # argv: ["info"]
     environments:
       staging:
-        runtime: compose
+        runtime: compose              # or `simulation`: full state machine, no containers (docs/SIMULATION.md)
         project_name: drawbridge-demo-staging
         build_profile: demo
         buildkit_socket: /run/drawbridge/buildkit/buildkitd.sock

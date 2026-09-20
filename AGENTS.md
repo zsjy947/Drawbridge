@@ -16,6 +16,7 @@ Drawbridge 是部署在目标 Linux 服务器（Ascend 910B，aarch64）上的 M
 | `docs/DEPLOYMENT.md` | 910B 安装、systemd、自检、客户端接入 |
 | `docs/OPERATIONS.md` | 维护模式、错误码处置、reconcile、审计 |
 | `docs/PROFILES.md` | 执行 profile 与 rootless BuildKit 接入 |
+| `docs/SIMULATION.md` | simulation 适配器与无 systemd 的命令行通信测试 |
 
 ## 常用命令
 
@@ -26,6 +27,7 @@ uv run pytest tests/unit/test_x.py -q          # 单文件
 uv run ruff check src tests                    # lint（零容忍）
 uv run mypy                                    # strict 模式（零容忍）
 uv run python -m drawbridge.entries.selfcheck_main --config-dir configs
+uv run drawbridge-simulate                     # 无 systemd 全链路通信测试（docs/SIMULATION.md）
 ```
 
 提交前三项检查必须全绿。测试使用 `asyncio_mode = "auto"`，无需装饰器。
@@ -40,11 +42,12 @@ src/drawbridge/
   state/       schema/store/records SQLite 状态层；locking.py 两层锁
   gateway/     service.py 工具编排与准入；mcp_app.py MCP 协议绑定；middleware.py 边缘
   runner/      loop.py 队列消费；deploy.py 工作流编排与恢复；runtime.py 生产步骤执行器；
+               simulation.py simulation 适配器 + RuntimeSelector（按环境选择 adapter）；
                handlers.py 诊断/变更 handler 注册表；builtin.py 纯 Python 诊断；
                health.py 健康门禁；logpage.py 日志快照分页
   fsops.py     安全 tar 解包、no-follow 文件打开
   gitops.py    受控 Git 客户端（统一 git_safe 环境）
-  entries/     gateway_main / runner_main / selfcheck_main
+  entries/     gateway_main / runner_main / selfcheck_main / simulate_main
 configs/       四份 YAML 示例 + Compose 模板 + 固定诊断脚本
 plans/ docs/   设计文档与运维手册
 ```
@@ -73,6 +76,11 @@ plans/ docs/   设计文档与运维手册
 9. **最小暴露面**：`public=false` 的操作永不能被 `ops_operation_run` 直接调用；
    workflow 步骤只能引用内部操作（loader 校验）；新 public 写操作必须在
    `gateway/service.py::_WRITE_KINDS` 登记显式 job kind（缺失即 CONFIG_INVALID）。
+10. **simulation 适配器不是旁路**：`runner/simulation.py` 只替换容器类步骤的
+   证据来源，准入/锁/预算/审计/漂移契约与生产同路径；所有模拟证据必须带
+   `simulated` / `validation_level: simulation` 标记，不得去掉标记或将模拟
+   结果当作生产验证证据。runtime adapter 的选择只来自配置
+   （`environments.<env>.runtime`），永远不来自请求参数。
 
 ## 平台约定
 
