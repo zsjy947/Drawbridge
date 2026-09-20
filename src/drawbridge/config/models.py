@@ -769,6 +769,19 @@ class RetentionPolicyConfig(StrictModel):
     job_record_days: int = Field(default=7, ge=1, le=365)
 
 
+class RecoveryConfig(StrictModel):
+    """Startup reconciliation knobs (MVP spec §8: 不明现场进入 NeedsAttention).
+
+    A running job whose heartbeat is older than ``stale_running_job_seconds``
+    is flipped to ``needs_attention`` at Runner startup (never re-run and
+    never silently taken over).  The default leaves a 180x margin over the
+    5-second heartbeat cadence.  Single-Runner deployment assumed (the
+    instance flock enforces it on one host).
+    """
+
+    stale_running_job_seconds: int = Field(default=900, ge=60, le=86400)
+
+
 class MainConfig(StrictModel):
     schema_version: Literal[1]
     server: ServerConfig
@@ -791,6 +804,7 @@ class MainConfig(StrictModel):
     output: OutputLimitsConfig = Field(default_factory=OutputLimitsConfig)
     maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
     retention: RetentionPolicyConfig = Field(default_factory=RetentionPolicyConfig)
+    recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
 
 
 # ---------------------------------------------------------------------------

@@ -594,6 +594,54 @@ class Store:
             await self.db.conn.commit()
         return count
 
+    async def reconcile_stale_running(
+        self, *, now: float, max_age_seconds: float
+    ) -> list[str]:
+        """Flip running jobs with dead heartbeats to needs_attention.
+
+        MVP spec §8: an unknown scene is never re-run or silently taken
+        over — the operator reconciles it.  ``heartbeat_at`` is the
+        discriminator; jobs that never heartbeated fall back to
+        ``started_at``.  Returns the reconciled job ids and appends one
+        ``job_reconciled`` audit event per job.
+        """
+        cutoff = now - max_age_seconds
+        async with self.db.conn.execute(
+            "SELECT job_id, owner FROM jobs WHERE status = ?"
+            " AND ((heartbeat_at IS NOT NULL AND heartbeat_at < ?)"
+            " OR (heartbeat_at IS NULL AND started_at IS NOT NULL AND started_at < ?))",
+            (JobStatus.RUNNING, cutoff, cutoff),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        reconciled: list[str] = []
+        for row in rows:
+            job_id = row["job_id"]
+            await self.finish_job(
+                job_id,
+                status=JobStatus.NEEDS_ATTENTION,
+                result={
+                    "error": {
+                        "code": "NEEDS_ATTENTION",
+                        "message": (
+                            "runner heartbeat timed out while the job was "
+                            "running; verify the actual scene before any "
+                            "further change"
+                        ),
+                    }
+                },
+            )
+            await self.append_event(
+                "job_reconciled",
+                job_id=job_id,
+                detail={
+                    "reason": "stale_heartbeat",
+                    "previous_status": "running",
+                    "owner": row["owner"],
+                },
+            )
+            reconciled.append(job_id)
+        return reconciled
+
     # ------------------------------------------------------------------
     # Steps
     # ------------------------------------------------------------------

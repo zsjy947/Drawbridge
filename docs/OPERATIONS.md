@@ -5,6 +5,10 @@
 
 > 无 systemd 环境或开发机上，Runner 可用 `--once`（单步）/`--drain`（排空）
 > 前台运行；通信链路的命令行验证见 [SIMULATION.md](SIMULATION.md)。
+>
+> Runner 启动时会自动把心跳超时（`recovery.stale_running_job_seconds`，默认
+> 900s）的 running job 标记为 `needs_attention` 并写 `job_reconciled` 审计
+> 事件——崩溃现场从不自动重跑，按 §3 reconcile。
 
 ## 1. 日常操作
 

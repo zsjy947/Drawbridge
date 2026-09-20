@@ -33,7 +33,8 @@ uv run drawbridge-simulate             # 无 systemd 的全链路通信测试（
 |---|---|
 | `drawbridge-gateway` | 无状态 MCP HTTP 网关：IP 白名单、可选 token、参数校验、排队 |
 | `drawbridge-runner`  | 唯一的执行主体：操作白名单、流程模板、隔离构建/测试、恢复 |
-| `drawbridge-simulate` | 命令行通信测试：无 systemd/无容器跑完整 plan→apply→回滚场景 |
+| `drawbridge-simulate` | 命令行通信测试：无 systemd/无容器跑完整 plan→apply→回滚场景（`--http` 走真实网络栈） |
+| `drawbridge-init-config` | 生成部署配置骨架（四份 YAML + Compose 模板，占位符清单见输出） |
 | SQLite | 同机状态库：plans/jobs/steps/releases/artifacts/idempotency/events |
 
 ## 文档
@@ -61,7 +62,11 @@ uv run drawbridge-simulate             # 无 systemd 的全链路通信测试（
 6. ✅ 运维可见性与保留策略：`ops_history` 有界历史查询（releases/jobs/events，
    回滚选版入口）+ Runner 内置保留清理任务（幂等键/plans/终态 job/日志目录；
    见 [plans/OPTIMIZATION_A_OPERATIONAL_VISIBILITY.md](plans/OPTIMIZATION_A_OPERATIONAL_VISIBILITY.md)）
-7. 🔶 待在 910B 上完成：真实示例应用的完整发布/回滚/漂移验收（MVP §10 清单）、
+7. ✅ 通信验收与运行恢复（优化计划 B）：`drawbridge-simulate --http`（边缘
+   中间件 + MCP Streamable HTTP + token 正负例）、Runner 启动时心跳超时 job
+   自动标记 needs_attention、`drawbridge-init-config` 配置骨架生成
+   （见 [plans/OPTIMIZATION_B_HTTP_ACCEPTANCE_AND_RECOVERY.md](plans/OPTIMIZATION_B_HTTP_ACCEPTANCE_AND_RECOVERY.md)）
+8. 🔶 待在 910B 上完成：真实示例应用的完整发布/回滚/漂移验收（MVP §10 清单）、
    低权限 profile 账号隔离的落地实施（见 docs/PROFILES.md）
 
 注意：operations.yaml 中的 argv 模板目前仅用于参数 schema 声明与配置摘要冻结，

@@ -71,6 +71,9 @@ class Runner:
         self._running_mutations = 0
         self._tasks: set[asyncio.Task[None]] = set()
         self._next_retention_at = time.monotonic() + config.main.retention.cleanup_interval_seconds
+        # 0.0 => the first tick reconciles stale running jobs left by a
+        # crashed previous Runner instance (MVP spec §8).
+        self._next_reconcile_at = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -141,6 +144,7 @@ class Runner:
         if expired:
             log.info("expired queued jobs", count=expired)
 
+        await self._maybe_reconcile_stale()
         await self._maybe_run_retention()
 
         maintenance = await self.store.db.get_control("maintenance")
@@ -188,6 +192,33 @@ class Runner:
             await run_retention(self.config, self.store)
         except Exception as exc:
             log.error("retention cleanup failed", error=str(exc))
+
+    async def _maybe_reconcile_stale(self) -> None:
+        """Flip running jobs with dead heartbeats to needs_attention.
+
+        Runs once at startup and then on the retention cadence.  Never
+        re-runs or takes over a job (spec §8); single-instance flock makes
+        the heartbeat the reliable liveness signal.  Failures never stop
+        queue consumption.
+        """
+        if time.monotonic() < self._next_reconcile_at:
+            return
+        self._next_reconcile_at = (
+            time.monotonic() + self.config.main.retention.cleanup_interval_seconds
+        )
+        try:
+            reconciled = await self.store.reconcile_stale_running(
+                now=time.time(),
+                max_age_seconds=float(
+                    self.config.main.recovery.stale_running_job_seconds
+                ),
+            )
+            for job_id in reconciled:
+                log.warning(
+                    "stale running job reconciled to needs_attention", job_id=job_id
+                )
+        except Exception as exc:
+            log.error("stale-job reconcile failed", error=str(exc))
 
     async def _cooldown_targets(self) -> dict[str, float]:
         """Targets whose deploy cooldown has not yet elapsed."""

@@ -48,7 +48,7 @@ src/drawbridge/
                health.py 健康门禁；logpage.py 日志快照分页
   fsops.py     安全 tar 解包、no-follow 文件打开
   gitops.py    受控 Git 客户端（统一 git_safe 环境）
-  entries/     gateway_main / runner_main / selfcheck_main / simulate_main
+  entries/     gateway_main / runner_main / selfcheck_main / simulate_main / initconfig_main
 configs/       四份 YAML 示例 + Compose 模板 + 固定诊断脚本
 plans/ docs/   设计文档与运维手册
 ```

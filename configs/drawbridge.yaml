@@ -68,3 +68,6 @@ retention:
   idempotency_key_days: 7          # MVP spec §8: idempotency key retention
   plan_days: 7                     # expired plans are removed after this
   job_record_days: 7               # terminal job records (releases keep theirs)
+
+recovery:
+  stale_running_job_seconds: 900   # running heartbeat timeout → needs_attention

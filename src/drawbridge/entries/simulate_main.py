@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import secrets
 import shutil
 import subprocess
 import sys
@@ -607,6 +608,297 @@ async def run_scenario(
         await database.close()
 
 
+# ---------------------------------------------------------------------------
+# HTTP mode: the same conversation over the real network stack
+# ---------------------------------------------------------------------------
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+async def _call_tool_http(session: Any, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Call one tool over Streamable HTTP; returns the parsed payload."""
+    result = await session.call_tool(name, arguments)
+    text = result.content[0].text if result.content else "{}"
+    try:
+        payload: dict[str, Any] = json.loads(text)
+    except json.JSONDecodeError:
+        payload = {"raw": text[:500]}
+    is_error = getattr(result, "is_error", getattr(result, "isError", False))
+    if is_error:
+        raise DrawbridgeError(
+            str(payload.get("message", f"tool {name} failed")),
+            code=str(payload.get("code", "INTERNAL")),
+        )
+    return payload
+
+
+async def run_http_scenario(
+    config_dir: str | Path,
+    *,
+    app: str | None = None,
+    environment: str | None = None,
+    git_ref: str = "refs/heads/main",
+    job_timeout: float = 240.0,
+    use_token: bool = True,
+    log: Any = None,
+) -> dict[str, Any]:
+    """Drive the scenario through a real gateway + MCP Streamable HTTP client.
+
+    The full production stack runs in-process: EdgeMiddleware (CIDR, Host,
+    Origin, optional bearer token) → MCP protocol app → uvicorn, and the
+    client is the official MCP SDK, so protocol serialization is exercised
+    end to end.  When ``use_token`` is on, a random bearer token is
+    generated and a token-less session is additionally asserted to be
+    rejected by the edge middleware.
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    from drawbridge.gateway.mcp_app import MCPAppFactory
+    from drawbridge.gateway.middleware import EdgeMiddleware, load_token_hash
+
+    config = load_config_from_dir(config_dir)
+    app_id, env_name = _select_target(config, app, environment)
+
+    port = _free_port()
+    config.main.server.bind_address = "127.0.0.1"
+    config.main.server.port = port
+    config.main.server.allowed_cidrs = ["127.0.0.0/8"]
+    config.main.server.allowed_hosts = [f"127.0.0.1:{port}"]
+    config.main.server.allowed_origins = [f"http://127.0.0.1:{port}"]
+
+    token: str | None = None
+    token_hash: str | None = None
+    if use_token:
+        token = secrets.token_urlsafe(24)
+        token_file = Path(config.main.paths.state_dir) / "simulate.token"
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(token, encoding="utf-8")
+        config.main.server.auth.mode = "token"
+        config.main.server.auth.token_file = str(token_file)
+        token_hash = load_token_hash(str(token_file))
+
+    database = Database(f"{config.main.paths.state_dir}/state.db")
+    await database.connect()
+    await database.initialize()
+    store = Store(database)
+    service = GatewayService(config, store, instance_id="simulate-http-gw")
+    edge = EdgeMiddleware(MCPAppFactory(service).build_asgi_app(), config.main.server, token_hash)
+
+    import uvicorn
+
+    server = uvicorn.Server(
+        uvicorn.Config(
+            edge,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            # Production posture: the allowlist judges the socket peer.
+            proxy_headers=False,
+            lifespan="on",
+        )
+    )
+    runner = Runner(config, store, poll_interval=0.05, instance_id="simulate-http-runner")
+    recorder = _StepRecorder()
+    releases: list[str] = []
+    url = f"http://127.0.0.1:{port}{config.main.server.base_path}"
+
+    async def deploy_over_http(session: Any, label: str) -> str | None:
+        planned = await _call_tool_http(
+            session,
+            "ops_release_plan",
+            {
+                "app": app_id,
+                "environment": env_name,
+                "source_mode": "local",
+                "git_ref": git_ref,
+                "agent_id": "drawbridge-simulate-http",
+            },
+        )
+        recorder.ok(f"ops_release_plan#{label}", planned.get("data"))
+        plan_id = planned["data"]["plan_id"]
+        applied = await _call_tool_http(
+            session,
+            "ops_release_apply",
+            {
+                "plan_id": plan_id,
+                "idempotency_key": f"http-{label}-{uuid.uuid4().hex[:12]}",
+                "agent_id": "drawbridge-simulate-http",
+            },
+        )
+        recorder.ok(f"ops_release_apply#{label}", applied.get("data"))
+        job_id = applied["job_id"]
+        final = await _wait_terminal(store, job_id, timeout=job_timeout)
+        if final["status"] == JobStatus.SUCCEEDED:
+            recorder.ok(f"deploy_job#{label}", final)
+            release_id = (final.get("result") or {}).get("release_id")
+            if release_id:
+                releases.append(str(release_id))
+            return str(release_id) if release_id else None
+        recorder.error(
+            f"deploy_job#{label}",
+            DrawbridgeError(
+                f"deploy job ended as {final['status']}",
+                code=str((final.get("result") or {}).get("error", {}).get("code", "INTERNAL")),
+            ),
+        )
+        return None
+
+    runner_task = asyncio.create_task(runner.run_forever())
+    server_task = asyncio.create_task(server.serve())
+    try:
+        deadline = time.monotonic() + 15
+        while not server.started and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        if not server.started:
+            raise DrawbridgeError("gateway did not start in time", code="INTERNAL")
+
+        if token is not None:
+            # Negative check first: a session without credentials must be
+            # rejected by the edge middleware itself, proving the guard is
+            # active on this stack.
+            try:
+                # The SDK yields (read, write) or (read, write, get_session_id)
+                # depending on the version — index defensively.
+                async with (
+                    streamable_http_client(url) as streams,
+                    ClientSession(streams[0], streams[1]) as anon,
+                ):
+                    await anon.initialize()
+                recorder.error(
+                    "edge_auth#anonymous",
+                    DrawbridgeError(
+                        "anonymous session was accepted although token auth is on",
+                        code="INTERNAL",
+                    ),
+                )
+            except BaseException:
+                # The SDK client surfaces the middleware's 401 as a
+                # BaseExceptionGroup (HTTPStatusError + transport
+                # cancellations) — the rejection itself is the expected
+                # outcome here.
+                recorder.ok(
+                    "edge_auth#anonymous",
+                    {"rejected": True, "detail": "request without bearer token refused"},
+                )
+
+        import httpx
+
+        # The SDK types its http_client against its vendored httpx2 build;
+        # plain httpx.AsyncClient is runtime-compatible (verified by the
+        # HTTP scenario), so the difference is typing-only.
+        http_client: Any = httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {token}"} if token else None,
+            timeout=httpx.Timeout(60.0),
+        )
+        async with (
+            streamable_http_client(url, http_client=http_client) as streams,
+            ClientSession(streams[0], streams[1]) as session,
+        ):
+            await session.initialize()
+            recorder.ok("mcp_initialize", {"protocol": "streamable-http"})
+
+            listed = await session.list_tools()
+            names = {t.name for t in listed.tools}
+            if "ops_catalog" not in names or "ops_history" not in names:
+                recorder.error(
+                    "tools_list",
+                    DrawbridgeError(
+                        "tool inventory incomplete",
+                        code="INTERNAL",
+                    ),
+                )
+            else:
+                recorder.ok("tools_list", {"tools": sorted(names)})
+
+            catalog = await _call_tool_http(session, "ops_catalog", {})
+            recorder.ok("ops_catalog", catalog.get("data"))
+
+            history = await _call_tool_http(
+                session,
+                "ops_history",
+                {
+                    "app": app_id,
+                    "environment": env_name,
+                    "what": "releases",
+                    "limit": 5,
+                },
+            )
+            recorder.ok("ops_history", history.get("data"))
+
+            first = await deploy_over_http(session, "one")
+            if first is not None:
+                logs = await _call_tool_http(
+                    session,
+                    "ops_logs",
+                    {
+                        "app": app_id,
+                        "environment": env_name,
+                        "service": "api",
+                        "limit": 5,
+                    },
+                )
+                recorder.ok("ops_logs#after_deploy", logs.get("data"))
+                second = await deploy_over_http(session, "two")
+                if second is not None:
+                    rolled = await _call_tool_http(
+                        session,
+                        "ops_release_rollback",
+                        {
+                            "app": app_id,
+                            "environment": env_name,
+                            "release_id": first,
+                            "reason": "http simulation communication test",
+                            "idempotency_key": (f"http-rollback-{uuid.uuid4().hex[:12]}"),
+                        },
+                    )
+                    recorder.ok("ops_release_rollback", rolled.get("data"))
+                    final = await _wait_terminal(store, rolled["job_id"], timeout=job_timeout)
+                    recorder.ok("rollback_job", final)
+        if log is not None:
+            for entry in recorder.steps:
+                log.info(
+                    "http scenario step",
+                    step=entry["name"],
+                    status=entry["status"],
+                    code=entry.get("code"),
+                )
+        current = await store.get_current_release(app_id, env_name)
+        return {
+            "ok": not recorder.failures,
+            "mode": "http",
+            "app": app_id,
+            "environment": env_name,
+            "runtime": "simulation",
+            "auth": "token" if token else "none",
+            "url": url,
+            "steps": recorder.steps,
+            "releases": releases,
+            "current_release": (
+                {
+                    "release_id": current.release_id,
+                    "commit_sha": current.commit_sha,
+                    "image_id": current.image_id,
+                    "status": current.status,
+                }
+                if current is not None
+                else None
+            ),
+        }
+    finally:
+        server.should_exit = True
+        await runner.stop()
+        runner_task.cancel()
+        await asyncio.gather(runner_task, server_task, return_exceptions=True)
+        await database.close()
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="drawbridge-simulate",
@@ -646,6 +938,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--job-timeout", type=float, default=240.0, help="per-job wait budget in seconds"
     )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help=(
+            "drive the scenario through a real gateway (uvicorn + edge "
+            "middleware) and an MCP Streamable HTTP client instead of "
+            "in-process service calls"
+        ),
+    )
+    parser.add_argument(
+        "--no-token",
+        action="store_true",
+        help="http mode only: disable the bearer-token check (auth: none)",
+    )
     return parser
 
 
@@ -683,16 +989,19 @@ def main(argv: list[str] | None = None) -> int:
             cleanup = args.workdir is None and not args.keep
             config_dir = create_fixture(workdir, source)
 
-        report = asyncio.run(
-            run_scenario(
-                config_dir,
-                app=args.app,
-                environment=args.environment,
-                git_ref=args.ref,
-                job_timeout=args.job_timeout,
-                log=log,
+        common = {
+            "app": args.app,
+            "environment": args.environment,
+            "git_ref": args.ref,
+            "job_timeout": args.job_timeout,
+            "log": log,
+        }
+        if args.http:
+            report = asyncio.run(
+                run_http_scenario(config_dir, use_token=not args.no_token, **common)
             )
-        )
+        else:
+            report = asyncio.run(run_scenario(config_dir, **common))
         report["config_dir"] = str(config_dir)
         report["workdir"] = str(workdir) if workdir else None
         report["workdir_kept"] = bool(workdir is not None and not cleanup)

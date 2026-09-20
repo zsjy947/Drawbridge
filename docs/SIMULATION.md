@@ -65,6 +65,20 @@ stdout 输出最终 JSON 报告（`ok` / 每步状态 / releases / 当前 releas
 
 集成测试 `tests/integration/test_simulate_flow.py` 复用同一入口做 CI 回归。
 
+### 2.1 `--http`：真实网络栈验收
+
+```bash
+uv run drawbridge-simulate --http            # 默认启用随机 bearer token
+uv run drawbridge-simulate --http --no-token # auth: none
+```
+
+HTTP 模式在同一进程内启动**完整生产栈**——EdgeMiddleware（CIDR/Host/Origin/
+token）→ MCP 协议应用 → uvicorn（`proxy_headers=False`）——并用官方 MCP SDK 的
+Streamable HTTP 客户端驱动场景。启用 token 时额外做一次负例断言：无凭据请求
+必须被边缘中间件拒绝。场景覆盖 initialize → tools/list → catalog/history →
+双部署 → logs → 回滚；报告带 `"mode": "http"` 与 `"auth"` 字段。
+`tests/integration/test_http_scenario.py` 复用该入口做 CI 回归（任意平台）。
+
 ## 3. 对既有配置运行
 
 `--config-dir` 模式要求所选 app/environment 声明 `runtime: simulation`：
