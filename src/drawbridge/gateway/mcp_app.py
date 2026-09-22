@@ -16,7 +16,9 @@ from typing import Any
 
 from mcp import types
 from mcp.server import Server
+from mcp.server.transport_security import TransportSecuritySettings
 
+from drawbridge.config.models import ServerConfig
 from drawbridge.errors import DrawbridgeError
 from drawbridge.gateway.service import GatewayService
 
@@ -35,6 +37,21 @@ TOOL_NAMES = (
     "ops_release_rollback",
     "ops_operation_run",
 )
+
+
+def _transport_security(server: ServerConfig) -> TransportSecuritySettings:
+    """Mirror the edge allowlist into the SDK's DNS-rebinding guard.
+
+    Without explicit settings the SDK auto-enables localhost-only Host
+    checking, which rejects every non-loopback client with 421 before the
+    edge middleware is ever consulted — LAN deployments become impossible.
+    Both layers must therefore read the same admin-maintained allowlist.
+    """
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[host.lower() for host in server.allowed_hosts],
+        allowed_origins=list(server.allowed_origins),
+    )
 
 
 def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -362,7 +379,10 @@ class MCPAppFactory:
 
     def build_asgi_app(self) -> Any:
         """Streamable HTTP ASGI app mounted under the configured base path."""
+        server = self.service.config.main.server
         return self.server.streamable_http_app(
             json_response=True,
             stateless_http=True,
+            host=server.bind_address,
+            transport_security=_transport_security(server),
         )
