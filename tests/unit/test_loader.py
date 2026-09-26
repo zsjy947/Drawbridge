@@ -42,6 +42,7 @@ apps:
         project_name: drawbridge-demo-staging
         build_profile: demo
         deploy_root: /srv/drawbridge/apps/demo/staging
+        build_output_dir: /srv/drawbridge/build-output/demo/staging
         compose_file: /etc/drawbridge/compose/demo.staging.yaml
         health_checks:
           - type: http

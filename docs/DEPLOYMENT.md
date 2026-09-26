@@ -36,6 +36,12 @@ sudo chown -R root:drawbridge /etc/drawbridge
 sudo chmod 2770 /var/lib/drawbridge /run/drawbridge /var/log/drawbridge
 # empty-hooks 是管理员维护的空目录（Git 统一前缀引用）
 
+# 构建产物交接目录（plan D16，必填项 build_output_dir 的实体）：
+# builder 账号可写、runner 组可读；每个登记环境一个
+sudo mkdir -p /srv/drawbridge/build-output/demo/staging
+sudo chown drawbridge-builder:drawbridge /srv/drawbridge/build-output/demo/staging
+sudo chmod 2750 /srv/drawbridge/build-output/demo/staging
+
 # 受控环境文件族（plan D13 交付）：
 # compose 插值钉死文件（必交付，缺失时 selfcheck FAIL、preflight CONFIG_INVALID）
 sudo cp configs/compose/empty.env /etc/drawbridge/compose/empty.env

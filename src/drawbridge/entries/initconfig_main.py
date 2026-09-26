@@ -126,6 +126,8 @@ apps:
         project_name: drawbridge-demo-staging
         build_profile: demo
         buildkit_socket: REPLACE_WITH_BUILDKIT_SOCKET
+        # REQUIRED handover dir (plan D16): builder-owned, runner-readable
+        build_output_dir: {root}/build-output/demo/staging
         deploy_root: {root}/apps/demo/staging
         compose_file: {root}/etc/compose/demo.staging.yaml
         health_checks:

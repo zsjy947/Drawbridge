@@ -265,6 +265,7 @@ apps:
         project_name: drawbridge-demo-sim
         build_profile: demo
         buildkit_socket: ""
+        build_output_dir: "{_posix(workdir / "build-output")}"
         deploy_root: "{_posix(workdir / "deploy")}"
         compose_file: "{_posix(compose_file)}"
         health_checks:

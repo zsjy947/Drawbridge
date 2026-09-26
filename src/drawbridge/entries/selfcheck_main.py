@@ -132,28 +132,58 @@ def run_checks(config_dir: str, role: str = "all") -> CheckResult:
         except (OSError, subprocess.SubprocessError) as exc:
             results.warn("docker compose", str(exc))
 
-    # 6. Rootless BuildKit socket (Runner concern; gateway/simulation skip)
+    # 6. Rootless BuildKit socket — REAL reachability probe (plan D16):
+    # file existence says nothing about the runner being able to connect
+    # (socket permissions, group membership), so the runner role executes
+    # `buildctl --addr <socket> du` per registered socket; any failure is a
+    # FAIL.  gateway/simulation roles skip the whole block.
     if buildless:
-        results.skip("rootless buildkit socket present", f"not required for role {role!r}")
+        results.skip("rootless buildkit reachable", f"not required for role {role!r}")
     else:
-        buildkit_ok = False
-        missing_sockets: list[str] = []
+        buildctl_path = config.main.toolchain.buildctl
+        targets: list[tuple[str, str]] = []
         for app_id, app in config.apps.items():
-            for env_name, env in app.environments.items():
-                socket_path = env.buildkit_socket
-                if not socket_path:
-                    missing_sockets.append(f"{app_id}/{env_name}")
-                    continue
-                if Path(socket_path).exists():
-                    buildkit_ok = True
-                else:
-                    missing_sockets.append(f"{app_id}/{env_name} ({socket_path})")
-        if buildkit_ok:
-            results.ok("rootless buildkit socket present")
-        else:
-            results.warn(
-                "rootless buildkit socket present",
-                f"deployment features blocked; missing for {missing_sockets or 'all apps'}",
+            for env_name, env_cfg in app.environments.items():
+                targets.append((f"{app_id}/{env_name}", env_cfg.buildkit_socket))
+        probed_ok = 0
+        for label, socket_path in targets:
+            if not socket_path:
+                results.fail(
+                    "rootless buildkit reachable",
+                    f"{label}: no buildkit_socket registered",
+                )
+                continue
+            if not Path(socket_path).exists():
+                results.fail(
+                    "rootless buildkit reachable",
+                    f"{label}: {socket_path} does not exist",
+                )
+                continue
+            try:
+                proc = subprocess.run(
+                    [buildctl_path, "--addr", socket_path, "du"],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=True,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                results.fail(
+                    "rootless buildkit reachable",
+                    f"{label}: buildctl probe failed: "
+                    f"{str(exc)[:160]} (socket permissions/group access — "
+                    "see docs/PROFILES.md §2)",
+                )
+                continue
+            probed_ok += 1
+            results.ok(
+                "rootless buildkit reachable",
+                f"{label}: du ok ({proc.stdout.strip()[:40]})",
+            )
+        if targets and probed_ok == 0:
+            results.fail(
+                "rootless buildkit reachable",
+                "no registered socket answered the buildctl probe",
             )
 
     # 6b. Compose interpolation pin + controlled-file family (plan D13).

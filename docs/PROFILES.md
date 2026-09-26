@@ -38,6 +38,22 @@ drawbridge-builder$ buildkitd --root ~/.local/share/buildkit \
   不信任可漂移标签；
 - 联网构建按管理员的基础镜像/依赖出口策略限制（内网镜像代理优先）。
 
+**交接目录与 socket 权限（plan D16 落地约定）**：
+
+- apps.yaml 的 `environments.<env>.build_output_dir` 是**必填**的固定交接
+  目录：属主 `drawbridge-builder`、组 `drawbridge`、模式 2750（builder 可写、
+  runner 组可读）。`buildctl --output dest=` 写入 `<dir>/<job_id>.tar`，
+  Runner 在 buildctl 成功后校验归档存在/非空 → 复制到
+  `deploy_root/jobs/<job_id>/image.tar` → 大小与 SHA-256 校验（摘要记入
+  release evidence）→ 删除交接副本 → 才进入 `docker load`；任一步失败即
+  `BUILD_FAILED`（变更前路径，无运行时副作用）；
+- buildkitd socket 需允许 runner 连接：socket 文件组设为 `drawbridge`、
+  模式 660（`srw-rw----`）。selfcheck（runner 角色）以
+  `buildctl --addr <socket> du` 真实探测可连接性，失败即 FAIL——文件存在
+  但连不上（组/权限错配）会在部署前暴露；
+- "共享组 + setgid 共享 BuildKit state"只作为文档化备选，**不作为默认
+  实现**——它削弱 builder/runner 的存储隔离边界。
+
 ## 3. 隔离测试容器
 
 测试容器生命周期由固定 argv 构成（create/start/wait/logs/stop/rm），

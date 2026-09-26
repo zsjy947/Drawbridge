@@ -262,6 +262,9 @@ class DeployWorkflow:
             evidence={
                 "health": state.step_results.get("health", {}),
                 "smoke": state.step_results.get("test", {}),
+                # Build artifact checksum lands in the release evidence
+                # (plan D16 handover contract).
+                "build": state.step_results.get("build", {}),
                 "verified_at": now,
             },
             created_at=now,

@@ -552,10 +552,22 @@ class NpuConfig(StrictModel):
 
 
 class EnvironmentConfig(StrictModel):
+    """One deployment target of one app.
+
+    ``build_output_dir`` (plan D16) is the REQUIRED fixed handover directory
+    owned by the rootless ``drawbridge-builder`` account and group-readable
+    by the runner: ``buildctl --output dest=`` writes the image tar there
+    (the builder cannot write the runner's job directory), the runner then
+    verifies and copies it under its own control path before ``docker
+    load``.  Existing bundles without the field fail CONFIG_INVALID at load
+    with this guidance — fill it in (see docs/PROFILES.md §2).
+    """
+
     runtime: Literal["compose", "simulation"]
     project_name: str = Field(pattern=_SERVICE_RE.pattern)
     build_profile: str = Field(pattern=_ID_RE.pattern)
     buildkit_socket: str = ""
+    build_output_dir: str
     deploy_root: str
     compose_file: str
     health_checks: list[HealthCheckConfig] = Field(min_length=1)

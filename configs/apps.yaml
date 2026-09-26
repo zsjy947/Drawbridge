@@ -26,6 +26,9 @@ apps:
         project_name: drawbridge-demo-staging
         build_profile: demo
         buildkit_socket: /run/drawbridge/buildkit/buildkitd.sock
+        # REQUIRED handover dir (plan D16): owned by drawbridge-builder,
+        # group-readable by the runner — buildctl writes the image tar here.
+        build_output_dir: /srv/drawbridge/build-output/demo/staging
         deploy_root: /srv/drawbridge/apps/demo/staging
         compose_file: /etc/drawbridge/compose/demo.staging.yaml
         health_checks:

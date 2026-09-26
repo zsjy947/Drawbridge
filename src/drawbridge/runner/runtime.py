@@ -17,6 +17,8 @@ restore_previous, stop_initial, release_finalize.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import json
 import os
 import re
@@ -180,6 +182,15 @@ def buildctl_argv(
         "--output",
         f"type=docker,name={image_tag},dest={image_archive}",
     ]
+
+
+def sha256_file(path: Path) -> str:
+    """Streaming SHA-256 of a file (image-tar handover checksum, plan D16)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def unique_image_tag(app: str, environment: str, job_id: str) -> str:
@@ -588,7 +599,10 @@ class DeployRuntime:
                 code=ErrorCode.BUILD_UNSUPPORTED_FRONTEND,
             )
         tag = unique_image_tag(state.app, state.environment, state.job.job_id)
-        archive = self._jobs_dir(state) / "image.tar"
+        # Plan D16 handover contract: buildctl writes into the builder-owned
+        # build_output_dir (the builder account cannot write the runner's job
+        # directory); the runner verifies and takes the archive over below.
+        handover = Path(env_cfg.build_output_dir) / f"{state.job.job_id}.tar"
         argv = buildctl_argv(
             buildkit_socket=env_cfg.buildkit_socket,
             context_dir=str(context_dir),
@@ -596,7 +610,7 @@ class DeployRuntime:
             dockerfile_basename=profile.dockerfile_basename,
             platform=profile.platform,
             image_tag=tag,
-            image_archive=str(archive),
+            image_archive=handover.as_posix(),
         )
         result = await self._exec(
             operation="image_build",
@@ -619,12 +633,37 @@ class DeployRuntime:
                 code=ErrorCode.BUILD_FAILED,
                 details=_failure_evidence(result),
             )
-        if not archive.is_file() or archive.stat().st_size == 0:
+        if not handover.is_file() or handover.stat().st_size == 0:
             raise DrawbridgeError(
-                "buildctl reported success but produced no image archive",
+                "buildctl reported success but the handover archive is "
+                f"missing or empty at {handover} (check build_output_dir "
+                "ownership/permissions per docs/PROFILES.md §2)",
                 code=ErrorCode.BUILD_FAILED,
             )
-        payload: dict[str, Any] = {"image_tag": tag, "image_archive": str(archive)}
+        archive = self._jobs_dir(state) / "image.tar"
+        try:
+            shutil.copyfile(handover, archive)
+        except OSError as exc:
+            raise DrawbridgeError(
+                f"cannot take over the build archive from {handover}: {exc}",
+                code=ErrorCode.BUILD_FAILED,
+            ) from exc
+        archive_bytes = archive.stat().st_size
+        if archive_bytes != handover.stat().st_size:
+            raise DrawbridgeError(
+                "handover archive size mismatch after copy", code=ErrorCode.BUILD_FAILED
+            )
+        archive_sha256 = await asyncio.to_thread(sha256_file, archive)
+        with contextlib.suppress(OSError):
+            # Best effort: keep the builder-owned directory clean; a sticky
+            # failure only costs disk until the next retention pass.
+            handover.unlink()
+        payload: dict[str, Any] = {
+            "image_tag": tag,
+            "image_archive": archive.as_posix(),
+            "archive_bytes": archive_bytes,
+            "archive_sha256": archive_sha256,
+        }
         # escape=/check= are built-in frontend behaviour: allowed and recorded.
         allowed_directives = {
             key: value for key, value in directives.items() if key in ("escape", "check")

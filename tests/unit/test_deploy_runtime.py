@@ -303,11 +303,12 @@ class TestDockerfileDirectiveGuard:
         )
         state = _minimal_state()
         state.source_dir = str(source)
-        # The fake executor cannot materialize the archive; pre-create it so
-        # the post-build artifact check passes and the result is returned.
-        job_dir = tmp_path / "deploy" / "jobs" / state.job.job_id
-        job_dir.mkdir(parents=True, exist_ok=True)
-        (job_dir / "image.tar").write_bytes(b"tar")
+        # The fake executor cannot materialize the handover archive;
+        # pre-create it in the builder-owned directory so the handover
+        # verification/copy path completes (plan D16).
+        handover_dir = tmp_path / "build-output"
+        handover_dir.mkdir(parents=True, exist_ok=True)
+        (handover_dir / f"{state.job.job_id}.tar").write_bytes(b"tar")
         runtime = DeployRuntime(
             config=config,
             store=store,
@@ -365,6 +366,7 @@ def _portable_config(tmp_path: Path) -> Any:
     for app in config.apps.values():
         for env in app.environments.values():
             env.deploy_root = str(tmp_path / "deploy")
+            env.build_output_dir = str(tmp_path / "build-output")
     return config
 
 
@@ -427,5 +429,76 @@ class TestImportTimeout:
             assert result["loaded"] is True
             assert seen["timeout"] == 1700.0
             assert "image.tar" in "/".join(seen["argv"])  # type: ignore[arg-type]
+        finally:
+            await database.close()
+
+
+class TestBuildOutputHandover:
+    """Plan D16: buildctl writes into the builder-owned build_output_dir;
+    the runner verifies, copies, checksums and cleans up before docker
+    load.  A broken handover fails as BUILD_FAILED with no runtime change."""
+
+    async def _run_build(
+        self, tmp_path: Path, handover_bytes: bytes | None
+    ) -> tuple[Any, Any, Any, Any]:
+        config = _portable_config(tmp_path)
+        database = Database(tmp_path / "state" / "state.db")
+        await database.connect()
+        await database.initialize()
+        store = Store(database)
+        pm = _RecordingProcessManager(accepted=True)
+        source = tmp_path / "source"
+        source.mkdir(exist_ok=True)
+        (source / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        state = _minimal_state()
+        state.source_dir = str(source)
+        handover_dir = tmp_path / "build-output"
+        handover_dir.mkdir(parents=True, exist_ok=True)
+        handover = handover_dir / f"{state.job.job_id}.tar"
+        if handover_bytes is not None:
+            handover.write_bytes(handover_bytes)
+        runtime = DeployRuntime(
+            config=config,
+            store=store,
+            process_manager=pm,  # type: ignore[arg-type]
+            log_dir=str(tmp_path / "logs"),
+        )
+        return runtime, state, handover, database
+
+    async def test_handover_copied_and_checksummed(self, tmp_path: Path) -> None:
+        import hashlib as _hashlib
+
+        runtime, state, handover, database = await self._run_build(
+            tmp_path, b"image-tar-bytes"
+        )
+        try:
+            payload = await runtime.step_image_build(state, {})
+            archive = tmp_path / "deploy" / "jobs" / state.job.job_id / "image.tar"
+            assert archive.read_bytes() == b"image-tar-bytes"
+            assert payload["archive_bytes"] == len(b"image-tar-bytes")
+            assert (
+                payload["archive_sha256"]
+                == _hashlib.sha256(b"image-tar-bytes").hexdigest()
+            )
+            assert payload["image_archive"] == archive.as_posix()
+            assert not handover.exists()  # builder dir cleaned up
+        finally:
+            await database.close()
+
+    async def test_empty_handover_rejected(self, tmp_path: Path) -> None:
+        runtime, state, _handover, database = await self._run_build(tmp_path, b"")
+        try:
+            with pytest.raises(DrawbridgeError) as exc:
+                await runtime.step_image_build(state, {})
+            assert exc.value.code == "BUILD_FAILED"
+            assert "handover" in str(exc.value)
+        finally:
+            await database.close()
+
+    async def test_missing_handover_rejected(self, tmp_path: Path) -> None:
+        runtime, state, _handover, database = await self._run_build(tmp_path, None)
+        try:
+            with pytest.raises(DrawbridgeError, match="missing or empty"):
+                await runtime.step_image_build(state, {})
         finally:
             await database.close()

@@ -253,3 +253,21 @@
   模型校验（1–1800，默认 300 取代固定 120）与实际 spec.timeout_seconds
   断言（1700 生效、argv 指向 image.tar）
 - 未验收：910B 连续多次部署后确认 jobs/ 仅存未回收项——待切生产操作回填
+
+
+## 2026-09-26 — D16 rootless BuildKit 产物交接与可访问性探测
+
+- 环境：`Windows 逻辑验证`
+- commit：见本条目对应提交（feat: rootless buildkit artifact handover and reachability probe）
+- 命令：`uv run pytest tests/unit/test_deploy_runtime.py -q`；全量
+  `uv run pytest -q`
+- 结果：352 passed——buildctl dest 指向 build_output_dir/<job_id>.tar
+  （posix 路径断言）；交接校验链（存在/非空 → 复制 → 大小核对 →
+  SHA-256 记入步骤结果与 release evidence → 交接副本清理）有正例；空/缺失
+  归档拒绝为 BUILD_FAILED（无运行时副作用）；selfcheck runner 角色以
+  buildctl du 真实探测（缺失 socket/探测失败均 FAIL，gateway/simulation
+  SKIP）；build_output_dir 必填（缺项 CONFIG_INVALID，apps.yaml/initconfig/
+  simulate 三处模板已同步）；PROFILES §2 补 socket 权限与交接属主约定、
+  setgid 备选仅文档化；DEPLOYMENT §2 补交接目录创建步骤
+- 未验收：910B 真实 rootless 构建一次通过且摘要核对成功（§5 切生产清单
+  第 8 步前置）——待实机执行后回填

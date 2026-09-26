@@ -180,6 +180,7 @@ class TestAppConfig:
             "project_name": "demo-staging",
             "build_profile": "demo",
             "deploy_root": "/srv/drawbridge/apps/demo/staging",
+            "build_output_dir": "/srv/drawbridge/build-output/demo/staging",
             "compose_file": "/etc/drawbridge/compose/demo.staging.yaml",
             "health_checks": [
                 HealthCheckConfig.model_validate(
@@ -380,6 +381,7 @@ class TestEnvConfigTypes:
             "project_name": "x",
             "build_profile": "x",
             "deploy_root": "/srv",
+            "build_output_dir": "/srv/build-output",
             "compose_file": "/etc/x.yaml",
             "health_checks": [],
             "services": ["api"],
