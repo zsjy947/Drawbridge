@@ -137,6 +137,33 @@ class SimulationRuntime(DeployRuntime):
 
     # -- simulated steps ----------------------------------------------------
 
+    async def step_release_preflight(
+        self, state: DeployState, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Disk/baseline preflight only: D13's compose env-file and template
+        existence gates target the production runtime — the simulation
+        adapter never invokes docker compose, and simulation hosts (Windows
+        dev machines, 910B personal directories) have no /etc/drawbridge."""
+        import shutil as _shutil
+
+        env_cfg = self._env_cfg(state)
+        root = Path(env_cfg.deploy_root)
+        root.mkdir(parents=True, exist_ok=True)
+        usage = _shutil.disk_usage(root)
+        if usage.free < env_cfg.disk_budget_bytes:
+            raise DrawbridgeError(
+                f"disk budget exceeded: {usage.free} free < "
+                f"{env_cfg.disk_budget_bytes} reserved",
+                code=ErrorCode.DISK_BUDGET_EXCEEDED,
+            )
+        return {
+            "disk_free_bytes": usage.free,
+            "disk_budget_bytes": env_cfg.disk_budget_bytes,
+            "baseline_release_id": (
+                state.baseline.release_id if state.baseline else None
+            ),
+        }
+
     async def step_image_build(
         self, state: DeployState, params: Mapping[str, Any]
     ) -> dict[str, Any]:

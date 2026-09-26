@@ -179,6 +179,9 @@ build_profiles:
 _COMPOSE_TEMPLATE = """\
 # Compose template — admin-side configuration; Drawbridge rewrites only the
 # image reference to the release's frozen immutable image ID.
+# The image token below must appear EXACTLY ONCE (raw-text count, comments
+# included).  Multiple services sharing one image must use a YAML anchor
+# (x-image: &img <token> / image: *img) rather than repeating the token.
 services:
   api:
     image: REPLACE_BY_DRAWBRIDGE
@@ -199,6 +202,13 @@ services:
           memory: 512m
     pids_limit: 128
     restart: unless-stopped
+"""
+
+_EMPTY_ENV_TEMPLATE = """\\
+# Drawbridge compose interpolation pin — DELIBERATELY EMPTY (plan D13).
+# Passed as --env-file on every compose invocation so no project-directory
+# .env is ever loaded implicitly; business secrets belong in the admin
+# template's env_file: directives.
 """
 
 
@@ -250,6 +260,9 @@ def init_config(
     compose = compose_dir / "demo.staging.yaml"
     compose.write_text(_COMPOSE_TEMPLATE, encoding="utf-8")
     created.append(compose)
+    empty_env = compose_dir / "empty.env"
+    empty_env.write_text(_EMPTY_ENV_TEMPLATE, encoding="utf-8")
+    created.append(empty_env)
     return created
 
 

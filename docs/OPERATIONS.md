@@ -87,7 +87,10 @@ schema v2 前的存量 plan（无指纹）一律 `STALE_PLAN`，需重新 plan�
 自定义前端——离线目标必然失败且报错误导，可达时也构成绕过受控构建的供应链
 入口，因此在 Runner 侧、任何 buildctl 调用之前直接拒绝
 （`BUILD_UNSUPPORTED_FRONTEND`）。`# escape=` / `# check=` 为前端内建行为，
-放行并记入构建步骤结果。
+放行并记入构建步骤结果。另：Compose 模板中 `REPLACE_BY_DRAWBRIDGE` 必须恰好
+出现一次，多服务共用镜像需 YAML 锚点（`x-image: &img` + `image: *img`）；
+compose 调用的 `--env-file` 钉死为 `<paths.config_dir>/compose/empty.env`
+（刻意为空，防项目目录 `.env` 隐式插值）。
 
 ## 3. NeedsAttention / RollbackFailed 的现场核实与 reconcile
 

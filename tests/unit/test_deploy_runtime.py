@@ -18,6 +18,7 @@ from drawbridge.errors import DrawbridgeError
 from drawbridge.runner.runtime import (
     DeployRuntime,
     buildctl_argv,
+    compose_env_file,
     compose_prefix,
     compose_stop_argv,
     compose_up_argv,
@@ -41,7 +42,12 @@ _IMAGE = "sha256:" + "a" * 64
 
 class TestArgvBuilders:
     def test_compose_prefix_fixed_shape(self) -> None:
-        prefix = compose_prefix("proj", "/srv/deploy", "/srv/deploy/compose.rendered.yaml")
+        prefix = compose_prefix(
+            "proj",
+            "/srv/deploy",
+            "/srv/deploy/compose.rendered.yaml",
+            "/etc/drawbridge/compose/empty.env",
+        )
         assert prefix == [
             "compose", "--ansi", "never",
             "--project-name", "proj",
@@ -49,6 +55,18 @@ class TestArgvBuilders:
             "--env-file", "/etc/drawbridge/compose/empty.env",
             "-f", "/srv/deploy/compose.rendered.yaml",
         ]
+
+    def test_compose_env_file_resolves_from_config_dir(self) -> None:
+        """D13: the --env-file literal resolves from paths.config_dir —
+        standard deployments keep the /etc path, anchored deployments follow
+        the config skeleton."""
+        assert (
+            compose_env_file("/etc/drawbridge") == "/etc/drawbridge/compose/empty.env"
+        )
+        assert compose_env_file("D:/run/etc") == "D:/run/etc/compose/empty.env"
+        assert compose_env_file("/home/ocr/drawbridge-run/etc") == (
+            "/home/ocr/drawbridge-run/etc/compose/empty.env"
+        )
 
     def test_compose_up_argv_no_extra_flags(self) -> None:
         argv = compose_up_argv(["prefix"])
@@ -118,6 +136,47 @@ class TestArgvBuilders:
         ):
             assert hardening in pairs
         assert ("/tmp:rw,noexec,nosuid,size=64m", "--cap-drop") in pairs
+
+
+class TestPreflightEnvPin:
+    """D13: a missing compose env pin fails the preflight cleanly BEFORE any
+    runtime change, instead of failing inside the recovery path."""
+
+    async def test_missing_env_pin_rejected_before_change(self, tmp_path: Path) -> None:
+        config = _portable_config(tmp_path)
+        config.main.paths.config_dir = str(tmp_path / "etc")
+        for app in config.apps.values():
+            for env in app.environments.values():
+                env.disk_budget_bytes = 1024**3  # keep the disk gate quiet
+        (tmp_path / "compose.template.yaml").write_text(
+            "services:\n  api:\n    image: REPLACE_BY_DRAWBRIDGE\n", encoding="utf-8"
+        )
+        for app in config.apps.values():
+            for env in app.environments.values():
+                env.compose_file = str(tmp_path / "compose.template.yaml")
+        database = Database(tmp_path / "state" / "state.db")
+        await database.connect()
+        await database.initialize()
+        store = Store(database)
+        runtime = DeployRuntime(
+            config=config,
+            store=store,
+            process_manager=_RecordingProcessManager(),  # type: ignore[arg-type]
+            log_dir=str(tmp_path / "logs"),
+        )
+        try:
+            with pytest.raises(DrawbridgeError) as exc:
+                await runtime.step_release_preflight(_minimal_state(), {})
+            assert exc.value.code == "CONFIG_INVALID"
+            assert "empty.env" in str(exc.value)
+            # delivering the pin flips the gate to pass
+            pin = tmp_path / "etc" / "compose" / "empty.env"
+            pin.parent.mkdir(parents=True, exist_ok=True)
+            pin.write_text("# pin\n", encoding="utf-8")
+            result = await runtime.step_release_preflight(_minimal_state(), {})
+            assert result["compose_env_file"] == pin.as_posix()
+        finally:
+            await database.close()
 
 
 class TestRenderCompose:

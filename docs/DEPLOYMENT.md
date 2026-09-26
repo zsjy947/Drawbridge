@@ -35,6 +35,14 @@ sudo mkdir -p /etc/drawbridge/{compose,scripts,empty-hooks} \
 sudo chown -R root:drawbridge /etc/drawbridge
 sudo chmod 2770 /var/lib/drawbridge /run/drawbridge /var/log/drawbridge
 # empty-hooks 是管理员维护的空目录（Git 统一前缀引用）
+
+# 受控环境文件族（plan D13 交付）：
+# compose 插值钉死文件（必交付，缺失时 selfcheck FAIL、preflight CONFIG_INVALID）
+sudo cp configs/compose/empty.env /etc/drawbridge/compose/empty.env
+# git 全局加固 stub / SSH wrapper / 固定诊断脚本（防御纵深，缺失仅 WARN）
+sudo cp configs/scripts/check_project_config.sh /etc/drawbridge/scripts/
+sudo install -m 644 /dev/null /etc/drawbridge/gitconfig   # 或拷贝你的加固版本
+sudo install -m 755 /dev/null /etc/drawbridge/ssh-wrapper # 仅 ssh origin 需要
 ```
 
 > **不要把 Gateway 加入 docker 组。** Docker socket 等价主机 root；只有 Runner
@@ -65,6 +73,7 @@ python3.12 -m venv /opt/drawbridge/venv
 
 ```bash
 sudo cp configs/{drawbridge,apps,operations,workflows}.yaml /etc/drawbridge/
+sudo cp configs/compose/{demo.staging.yaml,empty.env} /etc/drawbridge/compose/
 sudo chmod 640 /etc/drawbridge/*.yaml /etc/drawbridge/compose/*
 ```
 

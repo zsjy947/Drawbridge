@@ -146,6 +146,8 @@ def test_init_config_generates_loadable_bundle(tmp_path: Path) -> None:
     )
     names = {p.name for p in created}
     assert {"drawbridge.yaml", "apps.yaml", "operations.yaml", "workflows.yaml"} <= names
+    # D13: the skeleton ships the compose interpolation pin.
+    assert (tmp_path / "bundle" / "compose" / "empty.env").is_file()
 
     config = load_config_from_dir(tmp_path / "bundle")
     assert config.environment("demo", "staging").runtime == "compose"

@@ -62,7 +62,7 @@ _RUNTIME_LINUX = sys.platform == "linux"
 #: (D3); re-exported here for the rendering path and existing imports.
 COMPOSE_IMAGE_TOKEN = _COMPOSE_IMAGE_TOKEN
 
-_EMPTY_ENV_FILE = "/etc/drawbridge/compose/empty.env"
+_EMPTY_ENV_NAME = "empty.env"
 #: Default bounded preview size for spooled change steps.
 _DEFAULT_SUMMARY_BYTES = 65536
 _IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -97,8 +97,26 @@ def scan_dockerfile_directives(text: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+def compose_env_file(config_dir: str) -> str:
+    """The pinned compose env file, resolved from ``paths.config_dir``
+    (plan D13 — single source for every ``--env-file`` literal).
+
+    Standard ``/etc/drawbridge`` deployments resolve to the historical
+    literal; ``--root``-anchored layouts (910B personal-directory form)
+    resolve inside the config skeleton instead of requiring an admin to
+    create anything under ``/etc``.  The file is deliberately EMPTY: it
+    pins interpolation so no project-directory ``.env`` is ever loaded
+    implicitly and business secrets stay in the admin template's
+    ``env_file:`` directives.
+    """
+    return (Path(config_dir) / "compose" / _EMPTY_ENV_NAME).as_posix()
+
+
 def compose_prefix(
-    project_name: str, project_directory: str, compose_file: str
+    project_name: str,
+    project_directory: str,
+    compose_file: str,
+    env_file: str,
 ) -> list[str]:
     """The fixed ``C`` prefix from MVP spec §4 (never request-controlled)."""
     return [
@@ -110,7 +128,7 @@ def compose_prefix(
         "--project-directory",
         project_directory,
         "--env-file",
-        _EMPTY_ENV_FILE,
+        env_file,
         "-f",
         compose_file,
     ]
@@ -421,7 +439,10 @@ class DeployRuntime:
         self, env_cfg: EnvironmentConfig, compose_file: Path
     ) -> list[str]:
         return compose_prefix(
-            env_cfg.project_name, env_cfg.deploy_root, str(compose_file)
+            env_cfg.project_name,
+            env_cfg.deploy_root,
+            str(compose_file),
+            compose_env_file(self.config.main.paths.config_dir),
         )
 
     def _suite_for(self, env_cfg: EnvironmentConfig, suite: str) -> TestSuiteConfig:
@@ -441,6 +462,23 @@ class DeployRuntime:
         env_cfg = self._env_cfg(state)
         root = Path(env_cfg.deploy_root)
         root.mkdir(parents=True, exist_ok=True)
+        # Plan D13: fail cleanly BEFORE any runtime change when the pinned
+        # compose env file or the admin template is missing/unreadable —
+        # previously this surfaced as a misleading compose-up failure inside
+        # the recovery path (ROLLBACK_FAILED blocking the target).
+        env_file_str = compose_env_file(self.config.main.paths.config_dir)
+        env_file = Path(env_file_str)
+        if not env_file.is_file():
+            raise DrawbridgeError(
+                f"compose env file is missing: {env_file}; create it (an empty "
+                "file, see docs/DEPLOYMENT.md §4) and retry",
+                code=ErrorCode.CONFIG_INVALID,
+            )
+        if not Path(env_cfg.compose_file).is_file():
+            raise DrawbridgeError(
+                f"compose template is missing: {env_cfg.compose_file}",
+                code=ErrorCode.CONFIG_INVALID,
+            )
         usage = shutil.disk_usage(root)
         if usage.free < env_cfg.disk_budget_bytes:
             raise DrawbridgeError(
@@ -451,6 +489,7 @@ class DeployRuntime:
         return {
             "disk_free_bytes": usage.free,
             "disk_budget_bytes": env_cfg.disk_budget_bytes,
+            "compose_env_file": env_file_str,
             "baseline_release_id": (
                 state.baseline.release_id if state.baseline else None
             ),

@@ -40,6 +40,7 @@ from drawbridge.runner.logpage import (
     UnknownCursorError,
     paginate_lines,
 )
+from drawbridge.runner.runtime import compose_env_file
 from drawbridge.state.records import JobRecord, ReleaseRecord, StagedRelease
 from drawbridge.state.store import Store
 
@@ -251,7 +252,12 @@ async def run_check_project_config(ctx: JobContext, job: JobRecord) -> dict[str,
     env_cfg = ctx.config.environment(job.app, job.environment)
     diagnostics = env_cfg.diagnostics
     cwd = diagnostics.root if diagnostics else env_cfg.deploy_root
-    script = "/etc/drawbridge/scripts/check_project_config.sh"
+    # Resolved from paths.config_dir (plan D13): anchored deployments keep
+    # working without an /etc/drawbridge tree; standard deployments resolve
+    # to the historical literal.
+    script = (
+        Path(ctx.config.main.paths.config_dir) / "scripts" / "check_project_config.sh"
+    ).as_posix()
     spec = ExecutionSpec(
         operation="check_project_config",
         executable="/bin/bash",
@@ -492,7 +498,7 @@ async def _compose_command(
         "--project-directory",
         release_dir or app_cfg.deploy_root,
         "--env-file",
-        "/etc/drawbridge/compose/empty.env",
+        compose_env_file(ctx.config.main.paths.config_dir),
         "-f",
         compose_file,
     ]
@@ -583,7 +589,7 @@ async def _compose_prefix(ctx: JobContext, job: JobRecord) -> list[str]:
         "--project-directory",
         (release.deploy_dir if release else env_cfg.deploy_root) or env_cfg.deploy_root,
         "--env-file",
-        "/etc/drawbridge/compose/empty.env",
+        compose_env_file(ctx.config.main.paths.config_dir),
         "-f",
         env_cfg.compose_file,
     ]

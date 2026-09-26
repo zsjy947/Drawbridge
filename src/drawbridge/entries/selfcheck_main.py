@@ -156,6 +156,38 @@ def run_checks(config_dir: str, role: str = "all") -> CheckResult:
                 f"deployment features blocked; missing for {missing_sockets or 'all apps'}",
             )
 
+    # 6b. Compose interpolation pin + controlled-file family (plan D13).
+    # The empty.env pin is REQUIRED before the first real compose up; the
+    # gitconfig/ssh-wrapper/script files are defence-in-depth (git tolerates
+    # their absence) and only warn.
+    config_dir_path = Path(config.main.paths.config_dir)
+    env_pin = config_dir_path / "compose" / "empty.env"
+    if buildless:
+        results.skip("compose env pin present", f"not required for role {role!r}")
+    elif env_pin.is_file():
+        results.ok("compose env pin present", str(env_pin))
+    else:
+        results.fail(
+            "compose env pin present",
+            f"{env_pin} missing — every compose invocation pins --env-file to "
+            "it; copy configs/compose/empty.env (see docs/DEPLOYMENT.md §4)",
+        )
+    if not buildless or role == "all":
+        for name, relative, purpose in (
+            ("gitconfig", "gitconfig", "global git hardening (defence in depth)"),
+            ("ssh wrapper", "ssh-wrapper", "fixed SSH wrapper for ssh origins"),
+            (
+                "project config script",
+                Path("scripts") / "check_project_config.sh",
+                "admin-fixed diagnostic script",
+            ),
+        ):
+            target = config_dir_path / relative
+            if target.is_file():
+                results.ok(f"controlled file: {name}", str(target))
+            else:
+                results.warn(f"controlled file: {name}", f"{target} missing ({purpose})")
+
     # 7. Registered repos exist with expected origin config
     for app_id, app in config.apps.items():
         repo = Path(app.git.repo_path)

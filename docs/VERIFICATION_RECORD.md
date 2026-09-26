@@ -190,3 +190,20 @@
   SIGINT → 停止消费 + 取消在飞任务（CancelledError → needs_attention +
   审计）+ 退出 0；⑪ ValidatorConfig/示例 YAML 注记"登记的 validators 当前
   不执行（预留插件路径）"
+
+
+## 2026-09-26 — D13 compose empty.env：按 paths.config_dir 解析 + 交付与前置校验
+
+- 环境：`Windows 逻辑验证`
+- commit：见本条目对应提交（feat: resolve compose env pin from config_dir）
+- 命令：`uv run pytest tests/unit/test_deploy_runtime.py
+  tests/unit/test_reconcile_and_initconfig.py tests/unit/test_selfcheck_roles.py
+  -q`；全量 `uv run pytest -q`
+- 结果：337 passed——compose_env_file 三种 config_dir 解析断言（/etc 标准
+  部署零行为变化）；三处 --env-file 字面量归一（runtime/handlers 两处）；
+  check_project_config.sh 路径同源解析；preflight 缺 empty.env → 干净
+  CONFIG_INVALID（变更前失败而非恢复失败），交付后通过；init-config 骨架
+  含 compose/empty.env；selfcheck runner 视角缺失 FAIL、gateway/simulation
+  SKIP、gitconfig/ssh-wrapper/脚本缺失 WARN；模板注释补多服务单镜像锚点写法
+- 注记：模板注释中不可出现完整 token 字面量（计数含注释，已用占位描述）；
+  simulation preflight 覆写为仅磁盘/基线检查（适配器不触 compose）

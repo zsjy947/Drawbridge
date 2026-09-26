@@ -2,6 +2,15 @@
 # /etc/drawbridge/compose/demo.staging.yaml on the server, never inside the
 # business repository.  Drawbridge rewrites only the image reference to the
 # frozen immutable image ID of the release; ports/networks/resources are fixed.
+#
+# The image token (see below) must appear EXACTLY ONCE in this file — the
+# renderer counts raw-text occurrences, comments included.  Multiple services
+# sharing one image must use a YAML anchor instead of repeating the token
+# (plan D13 / N8⑥):
+#   x-image: &img <put the single token here>
+#   services:
+#     api:  {image: *img}
+#     worker: {image: *img}
 services:
   api:
     image: REPLACE_BY_DRAWBRIDGE   # replaced with the release's image ID
