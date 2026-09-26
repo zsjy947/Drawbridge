@@ -33,12 +33,15 @@ sudo systemctl restart drawbridge-gateway
 ```
 
 Gateway 启动时会把 `maintenance.enabled` 写入 `control_state` 控制记录；
-Runner 每次派发前重查该记录。紧急情况下也可以直接改库（等效于老流程）：
+Runner 每次派发前重查该记录。紧急情况下也可以直接改库（等效于老流程），
+**但改库后不要重启 Gateway**——启动会以 `maintenance.enabled` 的配置值
+覆盖控制记录，刚置上的紧急标志会被清掉：
 
 ```bash
 sudo -u drawbridge-gateway sqlite3 /var/lib/drawbridge/state.db \
   "UPDATE control_state SET value='true' WHERE key='maintenance';"
-sudo systemctl restart drawbridge-gateway
+# 不重启。Runner 每次派发重查控制记录，改库即时生效。
+# 紧急结束同样直接改库置回 false；之后可择机重启 Gateway 对齐配置值。
 ```
 
 若控制记录不可读（IO 错误），Runner 停止一切派发（fail closed）；排队任务
