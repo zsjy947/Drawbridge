@@ -355,6 +355,23 @@ class TestEnvironmentBudget:
                 {"step_log_hard_limit_bytes": 1024 * 1024 * 1024}
             )
 
+    def test_reserved_budgets_stay_declared_and_ordered(self) -> None:
+        """Plan D9 declared downgrade: step soft / job hard limits keep their
+        schema slots and sanity ordering even though no code consumes them
+        (frozen deploy_verify spools at most 3 steps x 20 MiB = 60 MiB)."""
+        from drawbridge.config.models import OutputLimitsConfig
+
+        config = OutputLimitsConfig.model_validate(
+            {
+                "step_log_soft_limit_bytes": 2048,
+                "step_log_hard_limit_bytes": 4096,
+                "job_log_hard_limit_bytes": 8192,
+            }
+        )
+        assert config.step_log_soft_limit_bytes == 2048
+        assert config.job_log_hard_limit_bytes == 8192
+        assert "NOT enforced by code" in OutputLimitsConfig.__doc__
+
 
 class TestEnvConfigTypes:
     def test_environment_requires_compose(self) -> None:

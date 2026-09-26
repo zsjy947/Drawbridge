@@ -649,6 +649,24 @@ class DiagnosticsRuntimeConfig(StrictModel):
 
 
 class OutputLimitsConfig(StrictModel):
+    """Output budget knobs (MVP spec §3).
+
+    Enforced per step: ``query_summary_max_bytes`` bounds result summaries,
+    ``log_result_*`` bound paged log fetches, ``step_log_hard_limit_bytes``
+    terminates a step whose output exceeds it.
+
+    Reserved, NOT enforced by code (plan D9, declared downgrade):
+    ``step_log_soft_limit_bytes`` and ``job_log_hard_limit_bytes`` have no
+    consumer — the frozen deploy_verify workflow spools at most 3 steps
+    (build / deploy / restore), each already capped by the per-step hard
+    limit, so a 3 x 20 MiB = 60 MiB worst case never reaches the 100 MiB
+    job ceiling and per-step soft-warning surface is unreachable.  The
+    fields stay for schema stability and sanity ordering (job >= step);
+    if a future workflow widens the spool-step count, wire them into the
+    step executor before relying on them.  Deviation recorded in
+    UPGRADED_ARCHITECTURE §4.
+    """
+
     query_summary_max_bytes: int = Field(default=65536, ge=1024, le=1024 * 1024)
     log_result_max_lines: int = Field(default=200, ge=1, le=1000)
     log_result_max_bytes: int = Field(default=262144, ge=1024, le=4 * 1024 * 1024)

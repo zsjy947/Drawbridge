@@ -88,9 +88,9 @@ output:
   query_summary_max_bytes: 65536
   log_result_max_lines: 200
   log_result_max_bytes: 262144
-  step_log_soft_limit_bytes: 1048576
+  step_log_soft_limit_bytes: 1048576     # reserved, not enforced (D9 deviation)
   step_log_hard_limit_bytes: 20971520
-  job_log_hard_limit_bytes: 104857600
+  job_log_hard_limit_bytes: 104857600    # reserved, not enforced (D9 deviation)
 
 maintenance:
   enabled: false

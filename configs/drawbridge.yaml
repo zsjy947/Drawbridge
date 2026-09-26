@@ -56,9 +56,11 @@ output:
   query_summary_max_bytes: 65536
   log_result_max_lines: 200
   log_result_max_bytes: 262144
-  step_log_soft_limit_bytes: 1048576
-  step_log_hard_limit_bytes: 20971520    # 20 MiB per step
-  job_log_hard_limit_bytes: 104857600    # 100 MiB per job
+  step_log_soft_limit_bytes: 1048576     # reserved, not enforced (D9 deviation)
+  step_log_hard_limit_bytes: 20971520    # 20 MiB per step (enforced)
+  job_log_hard_limit_bytes: 104857600    # 100 MiB per job — reserved, not
+                                         # enforced (D9 deviation, see
+                                         # plans/UPGRADED_ARCHITECTURE §4)
 
 maintenance:
   enabled: false
