@@ -315,7 +315,19 @@ class Runner:
                 log_dir=self.config.main.paths.log_dir,
             )
             result = await asyncio.wait_for(handler(ctx, job), timeout=self._job_timeout(job))
-            await self._finish_with_event(job, JobStatus.SUCCEEDED, result)
+            if ctx.staged_releases:
+                # Handler staged a release (release_rollback): atomic success
+                # completion (D4) — release + events + terminal state together.
+                await self.store.complete_job_with_release(
+                    job=job,
+                    terminal_status=JobStatus.SUCCEEDED,
+                    result=result,
+                    recovery=None,
+                    owner=self.instance_id,
+                    staged=ctx.staged_releases,
+                )
+            else:
+                await self._finish_with_event(job, JobStatus.SUCCEEDED, result)
             log.info(
                 "job finished",
                 job_id=job.job_id,
@@ -414,7 +426,7 @@ class Runner:
                 workflow_name=job.action,
             )
             try:
-                status, result, recovery = await asyncio.wait_for(
+                status, result, recovery, staged = await asyncio.wait_for(
                     workflow_runner.run(job), timeout=self._job_timeout(job)
                 )
             except asyncio.CancelledError:
@@ -452,7 +464,19 @@ class Runner:
                     },
                 )
                 return
-            await self._finish_with_event(job, status, result, recovery)
+            if staged is not None:
+                # Atomic success completion (D4): release + artifacts +
+                # events + job terminal state in one transaction.
+                await self.store.complete_job_with_release(
+                    job=job,
+                    terminal_status=status,
+                    result=result,
+                    recovery=recovery,
+                    owner=self.instance_id,
+                    staged=[staged],
+                )
+            else:
+                await self._finish_with_event(job, status, result, recovery)
         finally:
             heartbeat_task.cancel()
 

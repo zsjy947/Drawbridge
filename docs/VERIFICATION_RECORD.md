@@ -107,3 +107,15 @@
   有正反例；全量 314 passed
 - 未验收：910B simulation 全链路重跑、改模板（登记设备挂载）后旧 plan
   STALE_PLAN → 重新 plan 执行——待切生产操作时回填
+
+## 2026-09-26 — D4 部署成功路径原子完成
+
+- 环境：`Windows 逻辑验证`
+- commit：见本条目对应提交（feat: atomic success completion for deploy and rollback）
+- 命令：`uv run pytest tests/unit/test_deploy_workflow.py -q`；
+  全量 `uv run pytest -q`（含 simulate 全链路 plan→apply→ops_test→回滚）
+- 结果：注入式回滚测试通过（完成事务内 events 写入失败 → release/事件/
+  job 终态全不存在）；正常路径三表落库且事件序不变（release_recorded 先于
+  job_finished）；全量 315 passed
+- 未验收：910B 正常部署与显式回滚各跑一轮核对 releases/events/jobs 记录
+  完整——待切生产操作时回填

@@ -36,6 +36,7 @@ from drawbridge.state.records import (
     JobStatus,
     PlanRecord,
     ReleaseRecord,
+    StagedRelease,
     StepRecord,
     dumps,
     loads,
@@ -585,6 +586,158 @@ class Store:
                      dumps(recovery) if recovery else None, now, job_id),
                 )
             await self.db.conn.commit()
+
+    async def complete_job_with_release(
+        self,
+        *,
+        job: JobRecord,
+        terminal_status: str,
+        result: dict[str, Any] | None,
+        recovery: dict[str, Any] | None,
+        owner: str | None,
+        staged: Sequence[StagedRelease],
+    ) -> None:
+        """Atomic success completion (plan D4): releases, artifacts,
+        ``release_recorded`` events, the job's terminal transition and the
+        ``job_finished`` event in ONE ``BEGIN IMMEDIATE`` transaction.
+
+        Replaces the previous ≥3-transaction success path whose crash window
+        ("release recorded but job stuck running") needed manual
+        reconciliation.  ``reconcile_stale_running`` still covers the window
+        between the first runtime change and this transaction — there, no
+        release has been written yet and its semantics are unchanged.  Event
+        payloads and ordering match the pre-D4 writes exactly.
+        """
+        if terminal_status not in JobStatus.TERMINAL:
+            raise DrawbridgeError(
+                f"cannot finish job into non-terminal status {terminal_status!r}",
+                code=ErrorCode.INTERNAL,
+            )
+        now = time.time()
+        conn = self.db.conn
+        async with self.db.write_lock():
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                for item in staged:
+                    release = item.release
+                    await conn.execute(
+                        "UPDATE releases SET status = ? WHERE app = ?"
+                        " AND environment = ? AND status IN (?, ?)",
+                        ("superseded", release.app, release.environment,
+                         "succeeded", "rollback"),
+                    )
+                    await conn.execute(
+                        "INSERT INTO releases(release_id, app, environment,"
+                        " plan_id, job_id, commit_sha, image_id, image_tag,"
+                        " config_digest, simulated, status, rollback_of,"
+                        " compose_path, deploy_dir, evidence_json, created_at,"
+                        " verified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            release.release_id,
+                            release.app,
+                            release.environment,
+                            release.plan_id,
+                            release.job_id,
+                            release.commit_sha,
+                            release.image_id,
+                            release.image_tag,
+                            release.config_digest,
+                            1 if release.simulated else 0,
+                            release.status,
+                            release.rollback_of,
+                            release.compose_path,
+                            release.deploy_dir,
+                            dumps(release.evidence),
+                            release.created_at,
+                            release.verified_at,
+                        ),
+                    )
+                    if item.artifact is not None:
+                        artifact = item.artifact
+                        await conn.execute(
+                            "INSERT INTO artifacts(artifact_id, app, environment,"
+                            " kind, ref, release_id, size_bytes, sha256, created_at,"
+                            " retention_class) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                            (
+                                artifact.artifact_id,
+                                artifact.app,
+                                artifact.environment,
+                                artifact.kind,
+                                artifact.ref,
+                                artifact.release_id,
+                                artifact.size_bytes,
+                                artifact.sha256,
+                                artifact.created_at,
+                                artifact.retention_class,
+                            ),
+                        )
+                    await conn.execute(
+                        "INSERT INTO events(ts, kind, request_id, job_id,"
+                        " release_id, app, environment, agent_id, detail_json)"
+                        " VALUES(?,?,?,?,?,?,?,?,?)",
+                        (
+                            now,
+                            "release_recorded",
+                            job.request_id,
+                            job.job_id,
+                            release.release_id,
+                            release.app,
+                            release.environment,
+                            job.agent_id,
+                            dumps(item.event_detail),
+                        ),
+                    )
+                if owner is not None:
+                    cursor = await conn.execute(
+                        "UPDATE jobs SET status = ?, result_json = ?,"
+                        " recovery_json = ?, finished_at = ? WHERE job_id = ?"
+                        " AND owner = ?",
+                        (
+                            terminal_status,
+                            dumps(result) if result else None,
+                            dumps(recovery) if recovery else None,
+                            now,
+                            job.job_id,
+                            owner,
+                        ),
+                    )
+                else:
+                    cursor = await conn.execute(
+                        "UPDATE jobs SET status = ?, result_json = ?,"
+                        " recovery_json = ?, finished_at = ? WHERE job_id = ?",
+                        (
+                            terminal_status,
+                            dumps(result) if result else None,
+                            dumps(recovery) if recovery else None,
+                            now,
+                            job.job_id,
+                        ),
+                    )
+                if cursor.rowcount != 1:
+                    raise DrawbridgeError(
+                        "job disappeared before atomic completion",
+                        code=ErrorCode.INTERNAL,
+                    )
+                await conn.execute(
+                    "INSERT INTO events(ts, kind, request_id, job_id, release_id,"
+                    " app, environment, agent_id, detail_json)"
+                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        now,
+                        "job_finished",
+                        job.request_id,
+                        job.job_id,
+                        None,
+                        job.app,
+                        job.environment,
+                        job.agent_id,
+                        dumps({"action": job.action, "status": terminal_status}),
+                    ),
+                )
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
 
     async def expire_stale_queue(self) -> int:
         """Queue timeouts run on their own clock; returns expired count."""

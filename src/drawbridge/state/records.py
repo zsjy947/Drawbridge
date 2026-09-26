@@ -188,6 +188,19 @@ class ArtifactRecord:
     retention_class: str
 
 
+@dataclass(frozen=True)
+class StagedRelease:
+    """A release prepared by a workflow/handler, pending the job's terminal
+    transition (plan D4): the store writes releases + artifacts +
+    release_recorded event + job terminal state + job_finished event in ONE
+    transaction, so a crash can never leave "release recorded but job stuck
+    running".  Discarded untouched when the producing flow fails."""
+
+    release: ReleaseRecord
+    artifact: ArtifactRecord | None = None
+    event_detail: dict[str, Any] = field(default_factory=dict)
+
+
 def row_to_plan(row: Any) -> PlanRecord:
     keys = row.keys()
     return PlanRecord(

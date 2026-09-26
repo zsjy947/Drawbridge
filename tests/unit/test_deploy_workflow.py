@@ -142,19 +142,73 @@ class TestSuccessPath:
             config=config, store=store, step_executor=runtime
         )
         _plan, job = await admit_deploy_job(config, store, baseline_id=None, template_digest=digest)
-        status, result, recovery = await workflow.run(job)
+        status, result, recovery, staged = await workflow.run(job)
         assert status == JobStatus.SUCCEEDED
         assert recovery is None
         assert result["commit_sha"] == "a" * 40
         assert result["image_id"] == "sha256:" + "c" * 64
+        # D4: nothing is written until the caller commits the staged release
+        assert await store.get_current_release("demo", "staging") is None
+        assert staged is not None and staged.release.release_id == result["release_id"]
+        await store.complete_job_with_release(
+            job=job,
+            terminal_status=JobStatus.SUCCEEDED,
+            result=result,
+            recovery=None,
+            owner="runner-test",
+            staged=[staged],
+        )
         current = await store.get_current_release("demo", "staging")
         assert current is not None
         assert current.release_id == result["release_id"]
+        finished = await store.get_job(job.job_id)
+        assert finished.status == JobStatus.SUCCEEDED
         # all workflow steps ran in order
         expected = [s.operation for s in config.workflows["deploy_verify"].steps]
         assert runtime.calls == expected
         plan_after = await store.get_plan(_plan.plan_id)
         assert plan_after.status == "applied"
+
+    async def test_completion_transaction_rolls_back_on_error(self, setup) -> None:
+        """D4 injection test: a failure inside the completion transaction
+        leaves release/events/job terminal state ALL absent."""
+        config, store, digest = setup
+        runtime = FakeRuntime(fail_at=set())
+        workflow = DeployWorkflow(
+            config=config, store=store, step_executor=runtime
+        )
+        _plan, job = await admit_deploy_job(config, store, baseline_id=None, template_digest=digest)
+        status, result, _recovery, staged = await workflow.run(job)
+        assert status == JobStatus.SUCCEEDED and staged is not None
+
+        original = store.db.conn.execute
+
+        async def exploding_execute(sql: str, *args: object) -> object:
+            if "INSERT INTO events" in sql and "job_finished" not in sql:
+                raise RuntimeError("injected completion failure")
+            return await original(sql, *args)  # type: ignore[misc]
+
+        store.db.conn.execute = exploding_execute  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError, match="injected"):
+                await store.complete_job_with_release(
+                    job=job,
+                    terminal_status=JobStatus.SUCCEEDED,
+                    result=result,
+                    recovery=None,
+                    owner="runner-test",
+                    staged=[staged],
+                )
+        finally:
+            store.db.conn.execute = original  # type: ignore[method-assign]
+        assert await store.get_current_release("demo", "staging") is None
+        still_running = await store.get_job(job.job_id)
+        assert still_running.status == JobStatus.RUNNING
+        async with store.db.conn.execute(
+            "SELECT COUNT(*) AS n FROM events WHERE kind = 'release_recorded'"
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row["n"] == 0
 
 
 class TestFailureBeforeRuntimeChange:
@@ -165,7 +219,7 @@ class TestFailureBeforeRuntimeChange:
             config=config, store=store, step_executor=runtime
         )
         _plan, job = await admit_deploy_job(config, store, baseline_id=None, template_digest=digest)
-        status, result, recovery = await workflow.run(job)
+        status, result, recovery, _staged = await workflow.run(job)
         assert status == JobStatus.FAILED
         assert recovery is None
         assert result["error"]["code"] == "BUILD_FAILED"
@@ -185,7 +239,7 @@ class TestFailureAfterRuntimeChange:
         _plan, job = await admit_deploy_job(
             config, store, baseline_id="r-baseline", template_digest=digest
         )
-        status, result, recovery = await workflow.run(job)
+        status, result, recovery, _staged = await workflow.run(job)
         assert status == JobStatus.ROLLED_BACK
         assert recovery is not None
         assert recovery["status"] == "restored_previous"
@@ -202,7 +256,7 @@ class TestFailureAfterRuntimeChange:
             config=config, store=store, step_executor=runtime
         )
         _plan, job = await admit_deploy_job(config, store, baseline_id=None, template_digest=digest)
-        status, _result, recovery = await workflow.run(job)
+        status, _result, recovery, _staged = await workflow.run(job)
         assert status == JobStatus.FAILED_NO_BASELINE
         assert recovery is not None
         assert recovery["status"] == "stopped_initial"
@@ -218,7 +272,7 @@ class TestFailureAfterRuntimeChange:
         _plan, job = await admit_deploy_job(
             config, store, baseline_id="r-baseline", template_digest=digest
         )
-        status, _result, recovery = await workflow.run(job)
+        status, _result, recovery, _staged = await workflow.run(job)
         assert status == JobStatus.ROLLBACK_FAILED
         assert recovery is not None
         assert recovery["status"] == "recovery_failed"

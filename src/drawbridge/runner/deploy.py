@@ -31,6 +31,7 @@ from drawbridge.state.records import (
     JobStatus,
     PlanStatus,
     ReleaseRecord,
+    StagedRelease,
 )
 from drawbridge.state.store import Store, new_id
 
@@ -91,8 +92,14 @@ class DeployWorkflow:
         self.step_budgets = step_budgets or {}
         self.workflow = config.workflows[workflow_name]
 
-    async def run(self, job: JobRecord) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
-        """Returns (final_status, result, recovery_info)."""
+    async def run(
+        self, job: JobRecord
+    ) -> tuple[str, dict[str, Any], dict[str, Any] | None, StagedRelease | None]:
+        """Returns (final_status, result, recovery_info, staged_release).
+
+        ``staged_release`` is non-None only on success: the release record
+        (and its artifact) are handed to the caller unwritten so the job's
+        terminal transition and the release become ONE transaction (D4)."""
         plan = await self.store.get_plan(job.params["plan_id"])
         state = await self._prepare_state(job, plan)
 
@@ -144,8 +151,8 @@ class DeployWorkflow:
             completed_steps.append(step.id)
 
         if failure is None:
-            finalize_result = await self._finalize(job, state)
-            return JobStatus.SUCCEEDED, finalize_result, None
+            finalize_result, staged = await self._finalize(job, state)
+            return JobStatus.SUCCEEDED, finalize_result, None, staged
 
         recovery = None
         if state.runtime_change_started:
@@ -161,7 +168,7 @@ class DeployWorkflow:
                 await self.store.get_current_release(state.app, state.environment)
             ),
         }
-        return final_status, result, recovery
+        return final_status, result, recovery, None
 
     async def _prepare_state(self, job: JobRecord, plan: Any) -> DeployState:
         # Re-validate the frozen plan at execution start (spec §7).
@@ -201,7 +208,14 @@ class DeployWorkflow:
         state_budget = configured if configured is not None else remaining
         return max(1.0, min(state_budget, max(1.0, remaining)))
 
-    async def _finalize(self, job: JobRecord, state: DeployState) -> dict[str, Any]:
+    async def _finalize(
+        self, job: JobRecord, state: DeployState
+    ) -> tuple[dict[str, Any], StagedRelease]:
+        """Build the release record WITHOUT writing it (plan D4).
+
+        Persistence happens in :meth:`Store.complete_job_with_release`
+        together with the job's terminal transition; a crash between here
+        and that call leaves no release row behind."""
         from drawbridge.state.records import ArtifactRecord
 
         release_id = new_id()
@@ -230,42 +244,37 @@ class DeployWorkflow:
             created_at=now,
             verified_at=now,
         )
-        await self.store.record_release(release)
-        await self.store.append_event(
-            "release_recorded",
-            job_id=job.job_id,
-            release_id=release_id,
-            app=state.app,
-            environment=state.environment,
-            request_id=job.request_id,
-            agent_id=job.agent_id,
-            detail={
+        artifact = (
+            ArtifactRecord(
+                artifact_id=new_id(),
+                app=state.app,
+                environment=state.environment,
+                kind="image",
+                ref=state.image_id,
+                release_id=release_id,
+                size_bytes=None,
+                sha256=None,
+                created_at=now,
+                retention_class="current",
+            )
+            if state.image_id
+            else None
+        )
+        staged = StagedRelease(
+            release=release,
+            artifact=artifact,
+            event_detail={
                 "status": "succeeded",
                 "commit_sha": state.commit_sha,
                 "image_id": state.image_id,
             },
         )
-        if state.image_id:
-            await self.store.record_artifact(
-                ArtifactRecord(
-                    artifact_id=new_id(),
-                    app=state.app,
-                    environment=state.environment,
-                    kind="image",
-                    ref=state.image_id,
-                    release_id=release_id,
-                    size_bytes=None,
-                    sha256=None,
-                    created_at=now,
-                    retention_class="current",
-                )
-            )
         return {
             "release_id": release_id,
             "commit_sha": state.commit_sha,
             "image_id": state.image_id,
             "status": "succeeded",
-        }
+        }, staged
 
     async def _recover(
         self, job: JobRecord, state: DeployState, failure: BaseException

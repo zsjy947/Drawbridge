@@ -12,6 +12,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from dataclasses import field as dataclasses_field
 from datetime import UTC
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,7 @@ from drawbridge.runner.logpage import (
     UnknownCursorError,
     paginate_lines,
 )
-from drawbridge.state.records import JobRecord, ReleaseRecord
+from drawbridge.state.records import JobRecord, ReleaseRecord, StagedRelease
 from drawbridge.state.store import Store
 
 Handler = Callable[["JobContext", JobRecord], Awaitable[dict[str, Any]]]
@@ -58,6 +59,10 @@ class JobContext:
     store: Store
     process_manager: ProcessManager
     log_dir: str
+    #: Releases staged by a handler (release_rollback) for the atomic
+    #: success completion (plan D4): written together with the job's
+    #: terminal transition by the Runner loop; discarded on failure.
+    staged_releases: list[StagedRelease] = dataclasses_field(default_factory=list)
 
     def git_environment(self) -> dict[str, str]:
         return git_environment(
@@ -658,20 +663,18 @@ async def run_release_rollback(ctx: JobContext, job: JobRecord) -> dict[str, Any
         created_at=now,
         verified_at=now,
     )
-    await ctx.store.record_release(release)
-    await ctx.store.append_event(
-        "release_recorded",
-        job_id=job.job_id,
-        release_id=release.release_id,
-        app=job.app,
-        environment=job.environment,
-        request_id=job.request_id,
-        agent_id=job.agent_id,
-        detail={
-            "status": "rollback",
-            "rollback_of": target.release_id,
-            "image_id": target.image_id,
-        },
+    # Staged, not written (plan D4): the release row, its release_recorded
+    # event and the job's terminal transition commit together atomically.
+    ctx.staged_releases.append(
+        StagedRelease(
+            release=release,
+            artifact=None,
+            event_detail={
+                "status": "rollback",
+                "rollback_of": target.release_id,
+                "image_id": target.image_id,
+            },
+        )
     )
     return {
         "release_id": release.release_id,

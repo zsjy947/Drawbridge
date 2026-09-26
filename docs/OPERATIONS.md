@@ -118,6 +118,12 @@ Runner 异常退出后 OS 锁自动释放，但**锁释放不等于旧任务已�
   `runtime_change_started=1` 的 job 会以 `needs_attention` 呈现，
   要求人工核实现场（compose up 边界已持久化）。
 
+**成功路径的原子性（plan D4）**：部署/回滚成功时，release 行、制品、
+`release_recorded` 与 `job_finished` 审计事件、job 终态在**单个事务**内落库
+（`Store.complete_job_with_release`）——崩溃不会再产生"有 release 但 job 卡
+running"的中间态。`reconcile_stale_running` 仍保留，覆盖的是另一窗口：运行时
+变更已开始但完成事务未执行（此窗口内尚无 release 写入，语义不变）。
+
 ## 5. 保留与清理
 
 ### 5.1 自动保留任务（Runner 内置）
