@@ -557,14 +557,14 @@ class DeployRuntime:
                 "buildctl reported success but produced no image archive",
                 code=ErrorCode.BUILD_FAILED,
             )
-        result: dict[str, Any] = {"image_tag": tag, "image_archive": str(archive)}
+        payload: dict[str, Any] = {"image_tag": tag, "image_archive": str(archive)}
         # escape=/check= are built-in frontend behaviour: allowed and recorded.
         allowed_directives = {
             key: value for key, value in directives.items() if key in ("escape", "check")
         }
         if allowed_directives:
-            result["dockerfile_directives"] = allowed_directives
-        return result
+            payload["dockerfile_directives"] = allowed_directives
+        return payload
 
     async def step_image_import(
         self, state: DeployState, params: Mapping[str, Any]
