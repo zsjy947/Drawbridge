@@ -78,8 +78,7 @@ class EdgeMiddleware:
         if not host:
             return False
         # Entries may be given with or without the port; match either form.
-        hostname = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
-        return host in self.allowed_hosts or hostname in self.allowed_hosts
+        return host in self.allowed_hosts or _strip_port(host) in self.allowed_hosts
 
     def _token_ok(self, authorization: str) -> bool:
         if not authorization.startswith("Bearer "):
@@ -90,6 +89,21 @@ class EdgeMiddleware:
         presented_sha = hashlib.sha256(presented.encode("utf-8")).digest()
         expected_sha = bytes.fromhex(self.token_sha256)  # type: ignore[arg-type]
         return hmac.compare_digest(presented_sha, expected_sha)
+
+
+def _strip_port(host: str) -> str:
+    """Host without its port, bracket-aware for IPv6 literals (plan D11).
+
+    ``[2001:db8::1]:8787`` → ``[2001:db8::1]``; ``example.com:8787`` →
+    ``example.com``; a bare ``2001:db8::1`` (no port, no brackets) stays
+    intact instead of being mangled by a naive rsplit.
+    """
+    if host.startswith("["):
+        end = host.find("]")
+        return host[: end + 1] if end != -1 else host
+    if host.count(":") == 1:
+        return host.rsplit(":", 1)[0]
+    return host
 
 
 def token_sha256(token: str) -> str:

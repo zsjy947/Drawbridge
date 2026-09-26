@@ -210,7 +210,6 @@ SEMANTIC_VALIDATORS = frozenset(
         "environment_of_app",
         "registered_subdir",
         "opaque_cursor",
-        "uuid_record_exists",
     }
 )
 
@@ -481,6 +480,14 @@ class ConfigFileAlias(StrictModel):
 
 
 class ValidatorConfig(StrictModel):
+    """Registered plugin validator (MVP spec §4: isolated_test, post-MVP).
+
+    NOTE (plan D11): registered validators are NOT executed by the current
+    code — ``config_validate`` only runs the built-in JSON/TOML parsers.
+    The registry is the reserved plugin path; do not assume a listed
+    validator has run when reading diagnostic output.
+    """
+
     executable: str
     argv: list[str] = Field(min_length=1)
     timeout_seconds: int = Field(default=15, ge=1, le=300)
@@ -503,6 +510,15 @@ class DiagnosticsConfig(StrictModel):
 
 
 class RetentionConfig(StrictModel):
+    """Per-environment retention knobs (apps.yaml).
+
+    ``successful_releases`` is a MANUAL cleanup reference only: no code
+    executes it — the administrator keeps that many historical successful
+    releases' artifacts and reclaims older ones by hand via the target's
+    Docker workflow (OPERATIONS.md §5.3).  ``job_logs_days`` drives the
+    automated spool log cleanup.
+    """
+
     successful_releases: int = Field(default=5, ge=1, le=100)
     job_logs_days: int = Field(default=7, ge=1, le=365)
 

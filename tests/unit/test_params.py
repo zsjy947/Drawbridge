@@ -227,20 +227,16 @@ class TestSemanticValidators:
             validate_parameters({"subdir": spec}, {"subdir": value}, ctx())
 
     def test_uuid_shape(self) -> None:
-        spec = ParameterSpec.model_validate(
-            {"type": "string", "max_length": 36, "validators": ["uuid_record_exists"]}
-        )
-        out = validate_parameters(
-            {"plan_id": spec}, {"plan_id": "0b9e6c1e-7f2a-4c3b-9d0e-1a2b3c4d5e6f"}, ctx()
-        )
-        assert out["plan_id"] == "0b9e6c1e-7f2a-4c3b-9d0e-1a2b3c4d5e6f"
+        """uuid_record_exists was removed from SEMANTIC_VALIDATORS (plan D11:
+        dead config face, no operation ever referenced it) — registering it
+        now fails at load time."""
+        from drawbridge.config.models import SEMANTIC_VALIDATORS
 
-    def test_bad_uuid_shape(self) -> None:
-        spec = ParameterSpec.model_validate(
-            {"type": "string", "max_length": 36, "validators": ["uuid_record_exists"]}
-        )
-        with pytest.raises(InvalidParameterError):
-            validate_parameters({"plan_id": spec}, {"plan_id": "xyz"}, ctx())
+        assert "uuid_record_exists" not in SEMANTIC_VALIDATORS
+        with pytest.raises(Exception, match="unknown semantic validators"):
+            ParameterSpec.model_validate(
+                {"type": "string", "max_length": 36, "validators": ["uuid_record_exists"]}
+            )
 
 
 class TestRegexBudget:

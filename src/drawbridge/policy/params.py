@@ -27,9 +27,6 @@ from drawbridge.errors import DrawbridgeError, ErrorCode, InvalidParameterError
 
 REGEX_TIMEOUT_SECONDS = 0.1
 
-_UUID_RE = re.compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-)
 _APP_ID_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 
 #: git_ref shapes (MVP spec §2).  A SHA is valid only as exactly 40 lowercase
@@ -146,9 +143,6 @@ def _run_semantic_validator(validator: str, name: str, value: str, ctx: Validati
         return value in ctx.validator_names
     if validator == "environment_of_app":
         return value == ctx.environment
-    if validator == "uuid_record_exists":
-        # Format-level check only; existence is resolved by the store layer.
-        return _UUID_RE.fullmatch(value) is not None
     if validator == "registered_subdir":
         return _SUBDIR_SHAPE.fullmatch(value) is not None
     if validator == "opaque_cursor":

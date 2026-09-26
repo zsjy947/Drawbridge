@@ -169,3 +169,24 @@
 - 参数面：project_list 登记 `cursor`（opaque_cursor，默认 "0"=首页）与
   `limit`（1–200，默认 100），对齐 MVP §4；`config_read` 可选 release_id
   裁决为显式降级（偏差登记于 UPGRADED_ARCHITECTURE §4）
+
+## 2026-09-26 — D11 小项清理批（11 项）
+
+- 环境：`Windows 逻辑验证`
+- commit：见本条目对应提交（chore: review cleanup batch）
+- 命令：`uv run scripts/verify.py`（三绿，report.json 落盘
+  var/verification/20260926T144348Z/）
+- 结果：335 passed，**0 warnings**（unraisable 消除）；逐项 diff：
+  ① store 两处 assert → 显式 rowcount/None 检查（INTERNAL）；
+  ② simulate_main 注释 401→403；③ SEMANTIC_VALIDATORS 移除
+  uuid_record_exists（登记即拒，测试覆盖）；④ Host 解析括号感知剥端口
+  （IPv6 字面量正反例 4 条）；⑤ ops_release_plan baseline 以 Runner 侧
+  plan 记录为准（gateway 不再二次读取覆盖）；⑥⑦ token 生命周期与
+  successful_releases"人工对照参数"落 OPERATIONS/DEPLOYMENT/模型 docstring/
+  YAML 注释；⑧ unraisable 根因为 ProcessManager 子进程 transport 未确定性
+  close（非 aiosqlite）——finally 中显式 close 后全量回归 0 警告；
+  ⑨ queue_expired 两条路径（expire_stale_queue/claim 过期分支）补
+  job_queue_expired 审计事件（单事务内）；⑩ runner_main 注册 SIGTERM/
+  SIGINT → 停止消费 + 取消在飞任务（CancelledError → needs_attention +
+  审计）+ 退出 0；⑪ ValidatorConfig/示例 YAML 注记"登记的 validators 当前
+  不执行（预留插件路径）"

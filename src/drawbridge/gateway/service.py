@@ -527,7 +527,6 @@ class GatewayService:
         if parent_task_id:
             validate_tracing_id(parent_task_id, field="parent_task_id")
 
-        baseline = await self.store.get_current_release(app, environment)
         plan_params = {
             "git_ref": git_ref,
             "source_mode": source_mode,
@@ -548,9 +547,10 @@ class GatewayService:
                 "job_id": job_id,
                 "data": {"message": "plan still resolving; query ops_release_status"},
             }
-        result["baseline_release_id"] = (
-            baseline.release_id if baseline else result.get("baseline_release_id")
-        )
+        # The Runner-side plan record is the single reporting authority for
+        # the baseline (plan D11): this gateway-side read raced deploys that
+        # finished between plan dispatch and the report, producing a
+        # baseline that disagreed with the frozen plan the apply validates.
         return {"request_id": request_id, "status": "ok", "data": result}
 
     async def ops_release_apply(

@@ -57,10 +57,10 @@ apps:
               raw: false
               fields: [name, listen_port, log_level]
               sensitive_fields: [admin_token]
-          validators:
-            json_syntax:
-              executable: /usr/bin/python3
-              argv: ["-m", "json.tool"]
+          validators:                     # RESERVED: not executed by current
+            json_syntax:                   # code (config_validate is JSON/TOML
+              executable: /usr/bin/python3 # built-in only) — plugin path is
+              argv: ["-m", "json.tool"]    # post-MVP (plan D11 annotation)
               timeout_seconds: 15
         retention:
           successful_releases: 5

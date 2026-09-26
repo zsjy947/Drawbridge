@@ -157,8 +157,8 @@ apps:
               raw: false
               fields: [name, listen_port, log_level]
               sensitive_fields: [admin_token]
-          validators:
-            json_syntax:
+          validators:                     # RESERVED: not executed by code yet
+            json_syntax:                   # (config_validate is JSON/TOML only)
               executable: /usr/bin/python3
               argv: ["-m", "json.tool"]
               timeout_seconds: 15

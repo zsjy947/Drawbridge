@@ -104,6 +104,25 @@ class TestEdgeMiddleware:
         bad = await self.call(mw, headers={"Host": "evil.example"})
         assert bad[0]["status"] == 403
 
+    async def test_ipv6_host_literals_bracket_aware(self) -> None:
+        """Plan D11: bracketed IPv6 hosts strip only the port; bare IPv6
+        literals are not mangled by a naive colon rsplit."""
+        app, _ = self.make_capturing_app()
+        config = make_server_config(
+            allowed_hosts=["[2001:db8::1]:8787", "[::1]", "2001:db8::2"]
+        )
+        mw = EdgeMiddleware(app, config, None)
+        assert (await self.call(mw, headers={"Host": "[2001:db8::1]:8787"}))[0][
+            "status"
+        ] == 200
+        # registered without a port: with-port request still matches
+        assert (await self.call(mw, headers={"Host": "[::1]:9999"}))[0]["status"] == 200
+        assert (await self.call(mw, headers={"Host": "2001:db8::2"}))[0]["status"] == 200
+        # an unregistered IPv6 literal is rejected, not partially matched
+        assert (await self.call(mw, headers={"Host": "[2001:db8::ffff]:8787"}))[0][
+            "status"
+        ] == 403
+
     async def test_origin_allowlist(self) -> None:
         app, _ = self.make_capturing_app()
         mw = EdgeMiddleware(app, make_server_config(), None)

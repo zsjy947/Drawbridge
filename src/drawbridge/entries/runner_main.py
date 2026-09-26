@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import sys
 from pathlib import Path
 
@@ -91,16 +92,55 @@ async def run(
         config_digest=config.digest[:12],
         mode=("once" if once else "drain" if drain else "forever"),
     )
-    try:
+
+    # SIGTERM/SIGINT graceful shutdown (plan D11): systemd restarts otherwise
+    # hard-kill an in-flight deploy, leaving a ghost running job for the
+    # stale-heartbeat window during which new deploys can be admitted.  On
+    # the signal we stop consuming, cancel in-flight jobs (each flips to
+    # needs_attention with an audit event via its CancelledError path) and
+    # exit 0 — no resurrection, the operator reconciles per OPERATIONS §3.
+    stop_signal: asyncio.Event | None = None
+    if not once and not drain:
+        stop_signal = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        import signal
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            # Windows Proactor / restricted environments: KeyboardInterrupt
+            # still covers interactive use.
+            with contextlib.suppress(NotImplementedError, RuntimeError):
+                loop.add_signal_handler(sig, stop_signal.set)
+
+    async def _body() -> int:
         if once:
             await runner.tick_once()
         elif drain:
             await runner.run_until_idle(timeout=drain_timeout)
         else:
             await runner.run_forever()
+        return 0
+
+    try:
+        if stop_signal is None:
+            exit_code = await _body()
+        else:
+            body = asyncio.create_task(_body())
+            signal_watcher = asyncio.create_task(stop_signal.wait())
+            done, _pending = await asyncio.wait(
+                {body, signal_watcher}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if body in done:
+                signal_watcher.cancel()
+                exit_code = body.result()
+            else:
+                log.info("stop signal received; cancelling in-flight jobs")
+                body.cancel()
+                await asyncio.gather(body, return_exceptions=True)
+                await runner.stop()
+                exit_code = 0
     finally:
         await database.close()
-    return 0
+    return exit_code
 
 
 def main(argv: list[str] | None = None) -> int:

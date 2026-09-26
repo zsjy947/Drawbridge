@@ -231,7 +231,13 @@ class Store:
                         parent_task_id,
                     ),
                 )
-                assert cursor.rowcount == 1
+                if cursor.rowcount != 1:
+                    # Core admission invariant — never depend on `python -O`
+                    # stripping an assert away (plan D11).
+                    raise DrawbridgeError(
+                        "job insert did not produce exactly one row",
+                        code=ErrorCode.INTERNAL,
+                    )
                 if idempotency_key is not None:
                     await conn.execute(
                         "INSERT INTO idempotency_keys(key, action, app, environment,"
@@ -381,7 +387,11 @@ class Store:
     async def _job_by_id_in_conn(self, conn: Any, job_id: str) -> JobRecord:
         async with conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)) as cursor:
             row = await cursor.fetchone()
-        assert row is not None
+        if row is None:
+            raise DrawbridgeError(
+                f"job {job_id} vanished mid-transaction",
+                code=ErrorCode.INTERNAL,
+            )
         return row_to_job(row)
 
     # ------------------------------------------------------------------
@@ -426,6 +436,29 @@ class Store:
                             "UPDATE jobs SET status = ?, finished_at = ?"
                             " WHERE job_id = ? AND status = ?",
                             (JobStatus.QUEUE_EXPIRED, now, job.job_id, JobStatus.QUEUED),
+                        )
+                        # Audit the expiry here too (invariant 5): jobs that
+                        # time out inside the claim pass must not disappear
+                        # from the event chain (plan D11).
+                        await conn.execute(
+                            "INSERT INTO events(ts, kind, request_id, job_id, app,"
+                            " environment, agent_id, detail_json)"
+                            " VALUES(?,?,?,?,?,?,?,?)",
+                            (
+                                now,
+                                "job_queue_expired",
+                                job.request_id,
+                                job.job_id,
+                                job.app,
+                                job.environment,
+                                job.agent_id,
+                                dumps(
+                                    {
+                                        "kind": job.kind,
+                                        "queue_expires_at": job.queue_expires_at,
+                                    }
+                                ),
+                            ),
                         )
                         continue
                     target = f"{job.app}/{job.environment}"
@@ -744,18 +777,56 @@ class Store:
                 raise
 
     async def expire_stale_queue(self) -> int:
-        """Queue timeouts run on their own clock; returns expired count."""
+        """Queue timeouts run on their own clock; returns expired count.
+
+        Every flip to ``queue_expired`` appends a ``job_queue_expired``
+        audit event inside the same transaction (invariant 5: terminal
+        transitions must never vanish from the audit chain — plan D11)."""
         now = time.time()
+        conn = self.db.conn
+        expired = 0
         async with self.db.write_lock():
-            cursor = await self.db.conn.execute(
-                "UPDATE jobs SET status = ?, finished_at = ?"
-                " WHERE status = ? AND queue_expires_at IS NOT NULL"
-                " AND queue_expires_at <= ?",
-                (JobStatus.QUEUE_EXPIRED, now, JobStatus.QUEUED, now),
-            )
-            count = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
-            await self.db.conn.commit()
-        return count
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                async with conn.execute(
+                    "SELECT job_id, kind, app, environment, request_id, agent_id,"
+                    " queue_expires_at FROM jobs WHERE status = ?"
+                    " AND queue_expires_at IS NOT NULL AND queue_expires_at <= ?",
+                    (JobStatus.QUEUED, now),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                for row in rows:
+                    await conn.execute(
+                        "UPDATE jobs SET status = ?, finished_at = ?"
+                        " WHERE job_id = ? AND status = ?",
+                        (JobStatus.QUEUE_EXPIRED, now, row["job_id"], JobStatus.QUEUED),
+                    )
+                    await conn.execute(
+                        "INSERT INTO events(ts, kind, request_id, job_id, app,"
+                        " environment, agent_id, detail_json)"
+                        " VALUES(?,?,?,?,?,?,?,?)",
+                        (
+                            now,
+                            "job_queue_expired",
+                            row["request_id"],
+                            row["job_id"],
+                            row["app"],
+                            row["environment"],
+                            row["agent_id"],
+                            dumps(
+                                {
+                                    "kind": row["kind"],
+                                    "queue_expires_at": row["queue_expires_at"],
+                                }
+                            ),
+                        ),
+                    )
+                    expired += 1
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+        return expired
 
     async def reconcile_stale_running(
         self, *, now: float, max_age_seconds: float

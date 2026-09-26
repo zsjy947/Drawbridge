@@ -160,8 +160,9 @@ queued_at、events 按 ts 递减）。releases 视图带 `is_current` /
 
 - 磁盘达到 `disk_budget_bytes` 时拒绝新构建（`DISK_BUDGET_EXCEEDED`），
   preflight 也会在低于保留空间时拒绝构建；
-- 可清理：`retention.successful_releases`（默认 5）之外的历史制品（人工，
-  按目标机 Docker 流程）。
+- `retention.successful_releases`（默认 5）是**人工清理的对照参数**：代码
+  不自动执行——按该数量保留历史成功 release 的制品，超出部分由管理员按
+  目标机 Docker 流程人工回收。
 
 ## 6. 审计
 
@@ -173,6 +174,9 @@ agent_id、时间与脱敏摘要。token 只记哈希；密钥、完整环境变
 sqlite3 -json /var/lib/drawbridge/state.db \
   "SELECT * FROM events ORDER BY id DESC LIMIT 100;" > audit.json
 ```
+
+**token 生命周期**：bearer token 仅在 Gateway 启动时读取一次——轮换需要
+重启 Gateway；token 文件权限 600 是管理员责任（代码读取时不校验模式）。
 
 ## 7. 升级
 

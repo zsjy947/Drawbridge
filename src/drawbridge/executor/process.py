@@ -182,6 +182,20 @@ async def _terminate_tree_windows(pid: int) -> None:
         stderr=subprocess.DEVNULL,
     )
     await process.wait()
+    _close_transport(process)
+
+
+def _close_transport(proc: asyncio.subprocess.Process) -> None:
+    """Release a subprocess transport deterministically.
+
+    On Windows dev hosts the Proactor transports otherwise get collected
+    after the event loop closes and surface as unraisable 'Event loop is
+    closed' warnings at interpreter shutdown (plan D11 test hygiene).
+    """
+    transport = getattr(proc, "_transport", None)
+    if transport is not None:
+        with contextlib.suppress(OSError, RuntimeError):
+            transport.close()
 
 
 class ProcessManager:
@@ -294,6 +308,7 @@ class ProcessManager:
             if limit_task is not None and not limit_task.done():
                 limit_task.cancel()
             ledger.close()
+            _close_transport(proc)
 
     async def _terminate_group(
         self, proc: asyncio.subprocess.Process, *, grace: float | None = None

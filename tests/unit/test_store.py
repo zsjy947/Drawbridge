@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -265,6 +266,47 @@ class TestClaiming:
         after = await store.get_job(job.job_id)
         assert after.status == JobStatus.QUEUE_EXPIRED
         assert after.finished_at is not None
+
+    async def test_queue_expiry_appends_audit_event(self, store: Store) -> None:
+        """Plan D11 (invariant 5): a queue_expired terminal transition must
+        not vanish from the audit chain — both expiry paths append
+        job_queue_expired inside the same transaction."""
+        job = await store.admit_job(
+            idempotency_key="job-exp-audit-1x",
+            **{**BASE, "queue_timeout_seconds": 0.05},  # type: ignore[arg-type]
+        )
+        await asyncio.sleep(0.1)
+        assert await store.expire_stale_queue() == 1
+
+        async def _events_for(job_id: str) -> list[dict[str, Any]]:
+            async with store.db.conn.execute(
+                "SELECT kind, detail_json FROM events WHERE job_id = ?", (job_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+            import json as _json
+
+            return [
+                {"kind": r["kind"], "detail": _json.loads(r["detail_json"])}
+                for r in rows
+            ]
+
+        events = await _events_for(job.job_id)
+        assert [e["kind"] for e in events] == ["job_queue_expired"]
+        assert events[0]["detail"]["kind"] == BASE["kind"]
+        assert "queue_expires_at" in events[0]["detail"]
+
+        # Second path: expiry discovered during the claim pass (cooldown off —
+        # the first expiry already stamped finished_at on the target).
+        job2 = await store.admit_job(
+            idempotency_key="job-exp-audit-2x",
+            **{**BASE, "queue_timeout_seconds": 0.05, "cooldown_seconds": 0},  # type: ignore[arg-type]
+        )
+        await asyncio.sleep(0.1)
+        claimed = await store.claim_next_job(owner="runner-1", kinds=[JobKind.DEPLOY])
+        assert claimed is None
+        assert (await store.get_job(job2.job_id)).status == JobStatus.QUEUE_EXPIRED
+        events2 = await _events_for(job2.job_id)
+        assert [e["kind"] for e in events2] == ["job_queue_expired"]
 
     async def test_double_claim_is_impossible(self, store: Store) -> None:
         await store.admit_job(idempotency_key="solo-1-xxxxxxxxx", **BASE)  # type: ignore[arg-type]

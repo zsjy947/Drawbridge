@@ -147,7 +147,9 @@ claude mcp add --transport http drawbridge http://192.168.18.7:8787/mcp
 ```
 
 启用 token 时（`auth.mode: token`，管理员生成随机 token 写入
-`/etc/drawbridge/token`，权限 600）：
+`/etc/drawbridge/token`，权限 600）。**token 生命周期**：仅在 Gateway 启动时
+读取一次（哈希后驻留内存）——轮换 = 写入新文件后重启 Gateway；文件权限 600
+是管理员责任，代码不强制校验：
 
 ```powershell
 claude mcp add --transport http drawbridge http://192.168.18.7:8787/mcp --header "Authorization: Bearer <token>"

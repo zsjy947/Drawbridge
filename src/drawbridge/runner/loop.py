@@ -105,6 +105,14 @@ class Runner:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
+    def request_stop(self) -> None:
+        """Signal-initiated shutdown (plan D11): set the stop flag so the
+        consume loop exits, then the caller follows up with :meth:`stop` to
+        cancel in-flight jobs — each lands in needs_attention with an audit
+        event via its CancelledError path instead of leaving a ghost
+        running job behind a killed process."""
+        self._stopping.set()
+
     async def drain(self) -> None:
         """Wait for all in-flight job tasks (tests and graceful shutdown)."""
         while self._tasks:

@@ -779,7 +779,7 @@ async def run_http_scenario(
                     ),
                 )
             except BaseException:
-                # The SDK client surfaces the middleware's 401 as a
+                # The SDK client surfaces the middleware's 403 as a
                 # BaseExceptionGroup (HTTPStatusError + transport
                 # cancellations) — the rejection itself is the expected
                 # outcome here.
