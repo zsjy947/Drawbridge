@@ -224,3 +224,18 @@
   错误信息指向人工 reconcile
 - 未验收：910B 切模式场景（sim 时代 release 不作为 compose 基线/current，
   首部署失败走 failed_no_baseline）——待切生产操作时回填
+
+
+## 2026-09-26 — D14 失败证据完整化与诊断根陷阱
+
+- 环境：`Windows 逻辑验证`
+- commit：见本条目对应提交（feat: full failure evidence and diagnostics root fix）
+- 命令：`uv run pytest tests/unit/test_deploy_workflow.py
+  tests/unit/test_builtin_handlers.py -q`；全量 `uv run pytest -q`
+- 结果：346 passed——构建失败用例断言 details 含完整 stderr 环（5000 字符
+  全量进 step record 与 job result，message 保持 ≤500 单行截断）；诊断根
+  不存在时 config_read/project_list 返回结构化 NO_BASELINE（含"首次部署前
+  诊断根未就绪"指引）而非 INTERNAL(FileNotFoundError)；骨架与示例
+  apps.yaml 的 diagnostics.root 默认改为 {root}/repos/demo（不再指向永不
+  创建的 deploy_root/current）
+- 未验收：910B 切生产排障演练（失败 details 远程可读）——待切生产操作回填

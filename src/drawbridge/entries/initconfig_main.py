@@ -150,7 +150,9 @@ apps:
               memory: 512m
               pids_limit: 128
         diagnostics:
-          root: {root}/apps/demo/staging/current
+          # an EXISTING directory (the registered repo works); never
+          # deploy_root/current — it is never created (plan D14 trap)
+          root: {root}/repos/demo
           config_files:
             app_config:
               path: config/app.json

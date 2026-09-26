@@ -252,3 +252,29 @@ class TestBoundedScan:
         # the directory iteration stopped at cap+1: never all 20 entries
         assert len(result["entries"]) == 6
         assert result["truncated"] is True
+
+
+class TestDiagnosticsRootNotReady:
+    """Plan D14: a missing diagnostics root returns structured NO_BASELINE
+    with guidance instead of leaking INTERNAL(FileNotFoundError)."""
+
+    @staticmethod
+    def _ctx(tmp_path: Path) -> BuiltinContext:
+        return BuiltinContext(
+            app_id="demo",
+            environment="staging",
+            diagnostics_root=str(tmp_path / "never-created"),
+            config_files={},
+        )
+
+    def test_config_read_missing_root(self, tmp_path: Path) -> None:
+        with pytest.raises(DrawbridgeError) as exc:
+            handle_config_read(self._ctx(tmp_path), "app_config")
+        assert exc.value.code == "NO_BASELINE"
+        assert "diagnostics root" in str(exc.value)
+
+    def test_project_list_missing_root(self, tmp_path: Path) -> None:
+        with pytest.raises(DrawbridgeError) as exc:
+            handle_project_list(self._ctx(tmp_path), ".")
+        assert exc.value.code == "NO_BASELINE"
+        assert "diagnostics root" in str(exc.value)

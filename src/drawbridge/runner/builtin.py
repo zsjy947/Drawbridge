@@ -74,19 +74,35 @@ def _load_structured(raw: str, fmt: str) -> dict[str, Any]:
     raise DrawbridgeError(f"unknown structured format {fmt!r}", code=ErrorCode.INTERNAL)
 
 
-def handle_config_read(ctx: BuiltinContext, alias: str) -> dict[str, Any]:
-    if ctx.diagnostics_root is None:
+def _require_diagnostics_root(ctx: BuiltinContext) -> str:
+    """Structured gate for an unavailable diagnostics root (plan D14).
+
+    A missing root previously leaked INTERNAL(FileNotFoundError) — the
+    init-config skeleton used to point at a directory that is never created,
+    so every diagnostic failed confusingly before AND after the first
+    deployment.  NO_BASELINE carries the guidance instead; returns the
+    non-optional root for the caller."""
+    root = ctx.diagnostics_root
+    if root is None or not Path(root).is_dir():
         raise DrawbridgeError(
-            "diagnostics root is not registered for this environment",
+            "diagnostics root is not ready (not registered, or the "
+            "directory does not exist); before the first deployment, point "
+            "apps.yaml diagnostics.root at an existing snapshot/repository "
+            "directory",
             code=ErrorCode.NO_BASELINE,
         )
+    return root
+
+
+def handle_config_read(ctx: BuiltinContext, alias: str) -> dict[str, Any]:
+    diagnostics_root = _require_diagnostics_root(ctx)
     alias_spec = ctx.config_files.get(alias)
     if alias_spec is None:
         raise DrawbridgeError(
             f"file alias {alias!r} is not registered", code=ErrorCode.INVALID_PARAMETER
         )
 
-    fd = open_file_nofollow(ctx.diagnostics_root, alias_spec.path)
+    fd = open_file_nofollow(diagnostics_root, alias_spec.path)
     with os.fdopen(fd, "rb") as fh:
         size = os.fstat(fh.fileno()).st_size
         data = fh.read(CONFIG_READ_MAX_BYTES + 1)
@@ -145,15 +161,11 @@ def handle_project_list(
             f"limit must be between 1 and 200 (got {limit})",
             code=ErrorCode.INVALID_PARAMETER,
         )
-    if ctx.diagnostics_root is None:
-        raise DrawbridgeError(
-            "diagnostics root is not registered for this environment",
-            code=ErrorCode.NO_BASELINE,
-        )
+    diagnostics_root = _require_diagnostics_root(ctx)
     target = (
-        Path(os.path.realpath(ctx.diagnostics_root))
+        Path(os.path.realpath(diagnostics_root))
         if subdir in (".", "")
-        else _resolve_dir(ctx.diagnostics_root, subdir)
+        else _resolve_dir(diagnostics_root, subdir)
     )
     if not target.is_dir():
         raise DrawbridgeError(

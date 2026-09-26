@@ -275,6 +275,28 @@ def parse_compose_ps_images(text: str) -> list[str]:
     return images
 
 
+def _failure_evidence(result: ExecutionResult) -> dict[str, Any]:
+    """Bounded complete failure evidence (plan D14).
+
+    The head+tail summary ring already respects the step's output budget
+    and tolerates invalid UTF-8; putting it into ``DrawbridgeError.details``
+    makes it client-readable through the job result while the raw spool
+    files stay off MCP (MVP §3 unchanged).  The error message itself keeps
+    its short single-line preview.
+    """
+    details: dict[str, Any] = {
+        "termination_reason": result.termination_reason,
+        "exit_code": result.exit_code,
+        "stderr": result.stderr_preview,
+        "stdout_bytes": result.stdout_bytes,
+        "stderr_bytes": result.stderr_bytes,
+        "truncated": result.truncated,
+    }
+    if result.log_path:
+        details["log_ref"] = os.path.basename(result.log_path)
+    return details
+
+
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
@@ -595,6 +617,7 @@ class DeployRuntime:
             raise DrawbridgeError(
                 f"image build failed: {result.stderr_preview.strip()[:300]}",
                 code=ErrorCode.BUILD_FAILED,
+                details=_failure_evidence(result),
             )
         if not archive.is_file() or archive.stat().st_size == 0:
             raise DrawbridgeError(
@@ -630,6 +653,7 @@ class DeployRuntime:
             raise DrawbridgeError(
                 f"image import failed: {result.stderr_preview.strip()[:300]}",
                 code=ErrorCode.BUILD_FAILED,
+                details=_failure_evidence(result),
             )
         return {"loaded": True, "image_archive": str(archive)}
 
@@ -654,6 +678,7 @@ class DeployRuntime:
                 f"cannot identify imported image {tag}: "
                 f"{result.stderr_preview.strip()[:200]}",
                 code=ErrorCode.BUILD_FAILED,
+                details=_failure_evidence(result),
             )
         image_id = result.stdout_preview.strip()
         if not _IMAGE_ID_RE.fullmatch(image_id):
@@ -689,6 +714,7 @@ class DeployRuntime:
             raise DrawbridgeError(
                 f"compose up failed: {result.stderr_preview.strip()[:300]}",
                 code=ErrorCode.VERIFY_FAILED,
+                details=_failure_evidence(result),
             )
         return {"compose_file": str(rendered), "image_id": image_id}
 
@@ -773,6 +799,7 @@ class DeployRuntime:
             raise DrawbridgeError(
                 f"restore compose up failed: {result.stderr_preview.strip()[:300]}",
                 code=ErrorCode.ROLLBACK_FAILED,
+                details=_failure_evidence(result),
             )
         checks = await probe_health_checks(env_cfg.health_checks)
         require_healthy(checks)
@@ -821,6 +848,7 @@ class DeployRuntime:
             raise DrawbridgeError(
                 f"stop_initial failed: {result.stderr_preview.strip()[:200]}",
                 code=ErrorCode.ROLLBACK_FAILED,
+                details=_failure_evidence(result),
             )
         return {"stopped": True}
 
@@ -970,6 +998,7 @@ class DeployRuntime:
             raise DrawbridgeError(
                 f"rollback compose up failed: {up.stderr_preview.strip()[:300]}",
                 code=ErrorCode.ROLLBACK_FAILED,
+                details=_failure_evidence(up),
             )
         checks = await probe_health_checks(env_cfg.health_checks)
         require_healthy(checks)

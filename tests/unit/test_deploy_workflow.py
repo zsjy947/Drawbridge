@@ -211,6 +211,45 @@ class TestSuccessPath:
         assert row["n"] == 0
 
 
+class TestFailureEvidence:
+    async def test_build_failure_carries_full_stderr_details(self, setup) -> None:
+        """Plan D14: the error message keeps its short preview while the
+        bounded FULL stderr ring travels in details (step record + job
+        result), so a remote operator can locate the root cause."""
+        config, store, digest = setup
+        long_stderr = "E" * 5000
+        evidence = {"stderr": long_stderr, "termination_reason": "completed"}
+
+        class ExplodingRuntime:
+            async def __call__(
+                self, operation: str, state: Any, params: dict | None = None
+            ) -> dict[str, Any]:
+                if operation == "image_build":
+                    raise DrawbridgeError(
+                        f"image build failed: {long_stderr[:300]}",
+                        code="BUILD_FAILED",
+                        details=evidence,
+                    )
+                return {}
+
+        _plan, job = await admit_deploy_job(
+            config, store, baseline_id=None, template_digest=digest
+        )
+        workflow = DeployWorkflow(
+            config=config, store=store, step_executor=ExplodingRuntime()
+        )
+        status, result, _recovery, _staged = await workflow.run(job)
+        assert status == JobStatus.FAILED
+        assert result["error"]["code"] == "BUILD_FAILED"
+        assert len(result["error"]["message"]) <= 500
+        assert result["error"]["details"]["stderr"] == long_stderr
+        assert result["error"]["details"]["termination_reason"] == "completed"
+        steps = await store.list_steps(job.job_id)
+        failed = next(s for s in steps if s.status == "failed")
+        assert failed.detail["evidence"]["stderr"] == long_stderr
+        assert failed.detail["error"].startswith("image build failed")
+
+
 class TestFailureBeforeRuntimeChange:
     async def test_fails_without_recovery(self, setup) -> None:
         config, store, digest = setup

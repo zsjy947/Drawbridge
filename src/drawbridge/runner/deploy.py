@@ -130,11 +130,16 @@ class DeployWorkflow:
                     step_record_id, status="succeeded", detail=detail
                 )
             except BaseException as exc:
+                step_detail: dict[str, Any] = {"error": str(exc)[:300]}
+                if isinstance(exc, DrawbridgeError) and exc.details:
+                    # Plan D14: the bounded full evidence travels with the
+                    # step record; the message keeps its short preview.
+                    step_detail["evidence"] = exc.details
                 await self.store.finish_step(
                     step_record_id,
                     status="failed",
                     termination_reason=type(exc).__name__,
-                    detail={"error": str(exc)[:300]},
+                    detail=step_detail,
                 )
                 completed_steps.append(step.id)
                 if isinstance(exc, asyncio.CancelledError):
@@ -161,11 +166,17 @@ class DeployWorkflow:
         if state.runtime_change_started:
             recovery = await self._recover(job, state, failure)
         final_status = self._failure_status(job, recovery)
+        error_payload: dict[str, Any] = {
+            "code": _error_code(failure),
+            "message": str(failure)[:500],
+        }
+        if isinstance(failure, DrawbridgeError) and failure.details:
+            # Client-readable failure evidence (plan D14): the bounded full
+            # stderr summary etc., so a remote operator can locate the root
+            # cause without shell access to the spool directory.
+            error_payload["details"] = failure.details
         result = {
-            "error": {
-                "code": _error_code(failure),
-                "message": str(failure)[:500],
-            },
+            "error": error_payload,
             "steps_completed": completed_steps,
             "current_release": _release_dict(
                 await self.store.get_current_release(

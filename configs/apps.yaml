@@ -50,7 +50,10 @@ apps:
               memory: 512m
               pids_limit: 128
         diagnostics:
-          root: /srv/drawbridge/apps/demo/staging/current
+          # Point at an EXISTING directory (the registered repo works; or an
+          # admin-maintained snapshot dir). Do NOT use deploy_root/current —
+          # that directory is never created (plan D14 trap).
+          root: /srv/drawbridge/repos/demo
           config_files:
             app_config:
               path: config/app.json
