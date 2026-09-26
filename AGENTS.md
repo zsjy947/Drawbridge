@@ -28,9 +28,13 @@ uv run ruff check src tests                    # lint（零容忍）
 uv run mypy                                    # strict 模式（零容忍）
 uv run python -m drawbridge.entries.selfcheck_main --config-dir configs
 uv run drawbridge-simulate                     # 无 systemd 全链路通信测试（docs/SIMULATION.md）
+uv run scripts/verify.py                       # 一键质量门（ruff+mypy+pytest 落盘 var/verification/）
 ```
 
 提交前三项检查必须全绿。测试使用 `asyncio_mode = "auto"`，无需装饰器。
+`scripts/verify.py` 是质量门的标准留痕入口：输出与 `report.json` 落在
+`var/verification/<UTC 时间戳>/`，实机验收条目按 `docs/VERIFICATION_RECORD.md`
+的固定节格式追加记录。
 
 ## 代码结构
 
