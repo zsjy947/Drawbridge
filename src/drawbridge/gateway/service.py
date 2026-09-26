@@ -165,7 +165,7 @@ class GatewayService:
         ) as cursor:
             row = await cursor.fetchone()
         limit = self.config.main.concurrency.max_read_requests
-        return int(row["n"]) >= limit
+        return row is not None and int(row["n"]) >= limit
 
     async def _run_diagnostic(
         self,
