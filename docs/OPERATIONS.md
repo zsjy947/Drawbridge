@@ -64,10 +64,18 @@ sudo systemctl restart drawbridge-gateway
 | `STALE_PLAN` | 计划过期/基线变化/配置变化 | 重新 plan |
 | `DRIFT_DETECTED` | 人工改动与登记基线不一致 | 核实现场后 reconcile |
 | `BUILD_FAILED` | 构建失败 | 看 job 日志（spool 目录） |
+| `BUILD_UNSUPPORTED_FRONTEND` | Dockerfile 含 `# syntax=` 自定义前端指令 | 移除该指令后重新提交（离线目标无法拉取自定义 frontend；不可重试） |
 | `VERIFY_FAILED` | 健康门禁失败 | 自动恢复后检查恢复结果 |
 | `ROLLBACK_FAILED` / `NEEDS_ATTENTION` | 恢复失败 / 现场不明 | **人工核实现场**，见下节 |
 | `MAINTENANCE` | 维护模式 | 结束维护后重试 |
 | `UNSUPPORTED` | 功能在当前主机不可用（如 NPU 未登记） | 按需登记或忽略 |
+
+**构建约束（受控构建契约）**：业务仓库的 Dockerfile 只允许默认
+`dockerfile.v0` 前端。`# syntax=<image>` 指令会使 buildkitd 从 registry 拉取
+自定义前端——离线目标必然失败且报错误导，可达时也构成绕过受控构建的供应链
+入口，因此在 Runner 侧、任何 buildctl 调用之前直接拒绝
+（`BUILD_UNSUPPORTED_FRONTEND`）。`# escape=` / `# check=` 为前端内建行为，
+放行并记入构建步骤结果。
 
 ## 3. NeedsAttention / RollbackFailed 的现场核实与 reconcile
 

@@ -24,6 +24,7 @@ from drawbridge.runner.runtime import (
     parse_compose_ps_images,
     parse_wait_exit_code,
     render_compose_text,
+    scan_dockerfile_directives,
     unique_image_tag,
 )
 from drawbridge.runner.runtime import (
@@ -159,6 +160,109 @@ class TestParsers:
         assert parse_compose_ps_images("") == []
 
 
+class _RecordingProcessManager:
+    """Fake executor seam: records every spec instead of executing."""
+
+    def __init__(self, accepted: bool = False) -> None:
+        self.executed: list[str] = []
+        self.accepted = accepted
+
+    async def execute(self, spec: Any) -> Any:
+        self.executed.append(spec.operation)
+
+        class _Result:
+            pass
+
+        result = _Result()
+        result.accepted = self.accepted  # type: ignore[attr-defined]
+        result.stderr_preview = ""  # type: ignore[attr-defined]
+        return result
+
+
+class TestDockerfileDirectiveGuard:
+    """Plan D2: `# syntax=` must be rejected before buildctl is invoked."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("FROM scratch\n", {}),
+            ("# a plain comment\nFROM scratch\n", {}),
+            ("# syntax=docker/dockerfile:1\nFROM scratch\n", {"syntax": "docker/dockerfile:1"}),
+            ("#syntax=docker/dockerfile:1.7\nFROM scratch\n", {"syntax": "docker/dockerfile:1.7"}),
+            # mid-file occurrences are also rejected (conservative scan)
+            ("FROM scratch\n# syntax=ghcr.io/evil/frontend\nRUN true\n", {"syntax": "ghcr.io/evil/frontend"}),
+            ("# escape=`\nFROM scratch\n", {"escape": "`"}),
+            ("# check=skip=true\nFROM scratch\n", {"check": "skip=true"}),
+            ("# escape=`\n# check=skip=true\nFROM scratch\n", {"escape": "`", "check": "skip=true"}),
+            ("RUN echo '# syntax=x'\n", {}),
+        ],
+    )
+    def test_scan_table(self, text: str, expected: dict[str, str]) -> None:
+        assert scan_dockerfile_directives(text) == expected
+
+    async def test_syntax_directive_rejected_before_buildctl(self, tmp_path: Path) -> None:
+        config = _portable_config(tmp_path)
+        database = Database(tmp_path / "state" / "state.db")
+        await database.connect()
+        await database.initialize()
+        store = Store(database)
+        pm = _RecordingProcessManager()
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "Dockerfile").write_text(
+            "# syntax=docker/dockerfile:1\nFROM scratch\n", encoding="utf-8"
+        )
+        state = _minimal_state()
+        state.source_dir = str(source)
+        runtime = DeployRuntime(
+            config=config,
+            store=store,
+            process_manager=pm,  # type: ignore[arg-type]
+            log_dir=str(tmp_path / "logs"),
+        )
+        try:
+            with pytest.raises(DrawbridgeError) as exc:
+                await runtime.step_image_build(state, {})
+            assert exc.value.code == "BUILD_UNSUPPORTED_FRONTEND"
+            assert "syntax" in str(exc.value)
+            assert pm.executed == []  # rejection path never reached buildctl
+        finally:
+            await database.close()
+
+    async def test_builtin_directives_allowed_and_recorded(self, tmp_path: Path) -> None:
+        """escape/check pass the guard; the step result records them."""
+        config = _portable_config(tmp_path)
+        database = Database(tmp_path / "state" / "state.db")
+        await database.connect()
+        await database.initialize()
+        store = Store(database)
+        pm = _RecordingProcessManager(accepted=True)
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "Dockerfile").write_text(
+            "# escape=`\n# check=skip=true\nFROM scratch\n", encoding="utf-8"
+        )
+        state = _minimal_state()
+        state.source_dir = str(source)
+        # The fake executor cannot materialize the archive; pre-create it so
+        # the post-build artifact check passes and the result is returned.
+        job_dir = tmp_path / "deploy" / "jobs" / state.job.job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        (job_dir / "image.tar").write_bytes(b"tar")
+        runtime = DeployRuntime(
+            config=config,
+            store=store,
+            process_manager=pm,  # type: ignore[arg-type]
+            log_dir=str(tmp_path / "logs"),
+        )
+        try:
+            result = await runtime.step_image_build(state, {})
+            assert pm.executed == ["image_build"]
+            assert result["dockerfile_directives"] == {"escape": "`", "check": "skip=true"}
+        finally:
+            await database.close()
+
+
 @pytest.mark.skipif(sys.platform == "linux", reason="gating probe for non-target hosts")
 class TestTargetHostGating:
     async def test_steps_refuse_off_target_hosts(self, tmp_path: Path) -> None:
@@ -189,6 +293,20 @@ class TestTargetHostGating:
                 assert exc.value.code == "UNSUPPORTED", operation
         finally:
             await database.close()
+
+
+def _portable_config(tmp_path: Path) -> Any:
+    """Repo config with state/log/deploy paths anchored inside tmp_path.
+
+    Keeps step-level tests portable: `_jobs_dir` otherwise materializes the
+    registered Linux deploy_root on whatever drive the test host runs on.
+    """
+    config = load_config_from_dir(CONFIG_DIR)
+    config.main.paths.state_dir = str(tmp_path / "state")
+    for app in config.apps.values():
+        for env in app.environments.values():
+            env.deploy_root = str(tmp_path / "deploy")
+    return config
 
 
 def _minimal_state() -> Any:

@@ -72,3 +72,24 @@
 - 结果：<通过情况>
 - 证据路径：var/verification/<时间戳>/…（或“手工记录”）
 -->
+
+## 2026-09-26 — D1 systemd 单元与账号权限补齐
+
+- 环境：`Windows 逻辑验证`（文档级变更；实机验收待 910B systemd 部署）
+- commit：`c229a79`
+- 命令：无代码路径变化（unit 文件 + 文档）
+- 结果：两 unit 增加 `UMask=0007`、runner 增加 `SupplementaryGroups=docker`
+  与 DeviceAllow 注释模板；DEPLOYMENT §2 / OPERATIONS §8 同步
+- 未验收：双账号 state.db 写权限、`sudo -u drawbridge-runner docker version`、
+  systemd 下 `npu_status`——待 910B 切 systemd 时逐项执行并回填
+
+## 2026-09-26 — D2 Dockerfile `# syntax=` 指令防护
+
+- 环境：`Windows 逻辑验证`
+- commit：见本条目对应提交（feat: dockerfile syntax guard）
+- 命令：`uv run pytest tests/unit/test_deploy_runtime.py -q`
+- 结果：24 passed——表驱动扫描（首行/中部 syntax 识别、escape/check 识别、
+  注释误匹配不识别）；拒绝路径断言 buildctl 零调用；escape/check 放行且
+  记入步骤结果
+- 未验收：910B 上正常 Dockerfile 真实构建成功、含 syntax 构建返回结构化
+  错误——待首次真实构建时回填

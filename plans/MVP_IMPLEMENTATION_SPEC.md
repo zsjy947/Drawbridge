@@ -298,7 +298,9 @@ HTTP/IP/token 拒绝使用 403/401；工具业务错误按 MCP SDK 工具错误�
 
 新增明确错误：UNKNOWN_OPERATION、FORBIDDEN_OPERATION、INVALID_PARAMETER、NO_BASELINE、
 IDEMPOTENCY_CONFLICT、QUEUE_TIMEOUT、STALE_PLAN、DRIFT_DETECTED、OUTPUT_LIMIT、
-DISK_BUDGET_EXCEEDED；其余使用技术设计列出的错误。TIMEOUT/VERIFY_FAILED 不表示恢复成功，
+DISK_BUDGET_EXCEEDED；其余使用技术设计列出的错误。切生产审查补充错误码：
+BUILD_UNSUPPORTED_FRONTEND（Dockerfile `# syntax=` 自定义前端拒绝，不可重试）。
+TIMEOUT/VERIFY_FAILED 不表示恢复成功，
 必须另返回 recovery.status 和 recovery.release_id。
 
 幂等键全局命名空间，绑定 action/app/environment/规范化参数摘要；追踪字段不进入摘要。

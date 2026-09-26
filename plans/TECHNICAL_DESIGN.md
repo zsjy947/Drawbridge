@@ -654,7 +654,8 @@ deploy_root、预登记仓库、构建与日志目录，保留 `AF_UNIX`（Docke
   单卡/有限卡场景构建、测试和部署共享设备预约，避免测试抢占运行中的 NPU。
 - 结果结构：统一返回 request_id、job_id、status、error_code、retryable、next_cursor、
   truncated；错误区分 INVALID_PARAMETER、STALE_PLAN、BUSY、TIMEOUT、UNSUPPORTED、
-  BUILD_FAILED、VERIFY_FAILED、ROLLBACK_FAILED、NEEDS_ATTENTION、RATE_LIMITED、
+  BUILD_FAILED、BUILD_UNSUPPORTED_FRONTEND、VERIFY_FAILED、ROLLBACK_FAILED、
+  NEEDS_ATTENTION、RATE_LIMITED、
   MAINTENANCE。retryable 不代表
   应创建新请求，AI 先按原幂等键查询任务，避免不确定响应引起重复部署。
 - 健康与测试证据：关联实际 release/镜像 ID，记录检查时间、延迟、退出码和失败摘要。

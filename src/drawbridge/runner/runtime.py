@@ -62,6 +62,30 @@ _EMPTY_ENV_FILE = "/etc/drawbridge/compose/empty.env"
 _DEFAULT_SUMMARY_BYTES = 65536
 _IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
+#: Dockerfile parser directives (``# key=value`` comment lines understood by
+#: the dockerfile.v0 frontend).  ``syntax`` makes buildkitd pull a custom
+#: frontend image — impossible on the air-gapped 910B target and an
+#: uncontrolled supply-chain entry for the business repository; ``escape`` /
+#: ``check`` are built-in frontend behaviour and never trigger a pull.
+_DOCKERFILE_DIRECTIVE_RE = re.compile(r"^#\s*([A-Za-z]+)\s*=\s*(\S.*)$")
+_DOCKERFILE_SCAN_MAX_BYTES = 1024 * 1024
+
+
+def scan_dockerfile_directives(text: str) -> dict[str, str]:
+    """Collect ``# key=value`` parser directives from Dockerfile text.
+
+    Deliberately scans every comment line rather than only the leading
+    directive block: a stray ``# syntax=`` must never reach buildctl at all
+    (conservative by design — better a rejected build than a frontend pull
+    attempt that fails misleadingly on the offline target).
+    """
+    directives: dict[str, str] = {}
+    for line in text.splitlines():
+        match = _DOCKERFILE_DIRECTIVE_RE.match(line)
+        if match:
+            directives.setdefault(match.group(1).lower(), match.group(2).strip())
+    return directives
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers — unit-testable on every platform
@@ -472,6 +496,31 @@ class DeployRuntime:
                 f"dockerfile {profile.dockerfile_basename!r} missing in snapshot",
                 code=ErrorCode.CONFIG_INVALID,
             )
+        if dockerfile.stat().st_size > _DOCKERFILE_SCAN_MAX_BYTES:
+            raise DrawbridgeError(
+                f"dockerfile {profile.dockerfile_basename!r} exceeds the "
+                f"{_DOCKERFILE_SCAN_MAX_BYTES} byte directive-scan budget",
+                code=ErrorCode.CONFIG_INVALID,
+            )
+        try:
+            dockerfile_text = dockerfile.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise DrawbridgeError(
+                f"cannot read dockerfile {dockerfile}: {exc}",
+                code=ErrorCode.CONFIG_INVALID,
+            ) from exc
+        directives = scan_dockerfile_directives(dockerfile_text)
+        frontend = directives.get("syntax")
+        if frontend is not None:
+            # Rejected BEFORE any buildctl invocation — no side effects, no
+            # misleading frontend-pull timeout on the offline target.
+            raise DrawbridgeError(
+                f"dockerfile declares '# syntax={frontend}': custom build "
+                "frontends are not supported (offline target, controlled "
+                "build contract); remove the directive so the default "
+                "dockerfile.v0 frontend is used",
+                code=ErrorCode.BUILD_UNSUPPORTED_FRONTEND,
+            )
         tag = unique_image_tag(state.app, state.environment, state.job.job_id)
         archive = self._jobs_dir(state) / "image.tar"
         argv = buildctl_argv(
@@ -508,7 +557,14 @@ class DeployRuntime:
                 "buildctl reported success but produced no image archive",
                 code=ErrorCode.BUILD_FAILED,
             )
-        return {"image_tag": tag, "image_archive": str(archive)}
+        result: dict[str, Any] = {"image_tag": tag, "image_archive": str(archive)}
+        # escape=/check= are built-in frontend behaviour: allowed and recorded.
+        allowed_directives = {
+            key: value for key, value in directives.items() if key in ("escape", "check")
+        }
+        if allowed_directives:
+            result["dockerfile_directives"] = allowed_directives
+        return result
 
     async def step_image_import(
         self, state: DeployState, params: Mapping[str, Any]
