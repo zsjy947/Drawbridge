@@ -71,7 +71,6 @@ class TestOperationRun:
         service, _, _ = setup
         with pytest.raises(UnknownOperationError):
             await service.ops_operation_run("does_not_exist", "demo", "staging")
-
     async def test_internal_operation_forbidden(self, setup) -> None:
         service, _, _ = setup
         with pytest.raises(ForbiddenOperationError):
@@ -133,6 +132,95 @@ class TestOperationRun:
                 idempotency_key="restart-2-xxxxxxx",
             )
         await store.db.set_control("maintenance", "false")
+
+
+class TestDiagnosticAdmissionCap:
+    """Plan D7: concurrency.max_read_requests gates the diagnostic channel
+    at admission; diagnostic backlog never starves mutation capacity."""
+
+    @staticmethod
+    async def _fill_diagnostics(store: Store, count: int) -> None:
+        from drawbridge.state.records import JobKind
+
+        for _ in range(count):
+            await store.admit_job(
+                kind=JobKind.DIAGNOSTIC,
+                action="host_metrics",
+                app="demo",
+                environment="staging",
+                params={},
+                idempotency_key=None,
+                config_digest="d" * 64,
+                queue_timeout_seconds=600,
+                deadline_seconds=60,
+                max_queued=50,
+                max_queued_per_target=5,
+            )
+
+    async def test_saturated_channel_returns_busy_without_job(self, setup) -> None:
+        service, store, config = setup
+        config.main.concurrency.max_read_requests = 2
+        await self._fill_diagnostics(store, 2)
+        before = await self._job_count(store)
+        with pytest.raises(DrawbridgeError) as exc:
+            await service.ops_status("demo", "staging")
+        assert exc.value.code == ErrorCode.BUSY
+        assert exc.value.retryable is True
+        assert exc.value.retry_after_seconds is not None and exc.value.retry_after_seconds >= 1
+        assert await self._job_count(store) == before  # no job created
+
+    async def test_terminal_jobs_recycle_quota(self, setup) -> None:
+        service, store, config = setup
+        config.main.concurrency.max_read_requests = 1
+        await self._fill_diagnostics(store, 1)
+        with pytest.raises(DrawbridgeError) as exc:
+            await service.ops_status("demo", "staging")
+        assert exc.value.code == ErrorCode.BUSY
+        # finish the queued diagnostic → quota recycles, admission works again
+        from drawbridge.state.records import JobStatus
+
+        async with store.db.conn.execute(
+            "SELECT job_id FROM jobs WHERE kind = 'diagnostic' LIMIT 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        await store.finish_job(row["job_id"], status=JobStatus.SUCCEEDED, result={})
+        job = await service._run_diagnostic(
+            action="host_metrics",
+            app="demo",
+            environment="staging",
+            params={},
+            operation_timeout=1,
+            request_id="r",
+        )
+        assert job is not None
+
+    async def test_diagnostic_backlog_does_not_block_mutations(self, setup) -> None:
+        """Even a large diagnostic backlog leaves mutation capacity intact."""
+        _service, store, config = setup
+        config.main.concurrency.max_queued_jobs_per_target = 2
+        # diagnostics alone would exceed the per-target queue limit
+        await self._fill_diagnostics(store, 5)
+        from drawbridge.state.records import JobKind
+
+        await store.admit_job(
+            kind=JobKind.RESTART,
+            action="service_restart",
+            app="demo",
+            environment="staging",
+            params={"service": "api"},
+            idempotency_key="mutation-cap-1",
+            config_digest=config.digest,
+            queue_timeout_seconds=600,
+            deadline_seconds=60,
+            max_queued=50,
+            max_queued_per_target=2,
+        )
+
+    @staticmethod
+    async def _job_count(store: Store) -> int:
+        async with store.db.conn.execute("SELECT COUNT(*) AS n FROM jobs") as cursor:
+            row = await cursor.fetchone()
+        return int(row["n"])
 
 
 class TestPlanApply:

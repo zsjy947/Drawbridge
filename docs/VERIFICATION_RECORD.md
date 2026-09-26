@@ -144,3 +144,14 @@
 - 结果：6 passed——四角色快照差异断言（gateway/simulation 的 skip 计数 >
   all、runner == all）、simulation/gateway 角色退出码 0、Python 基线行
 - 未验收：910B 以 simulation 角色自检 0 failed——待切生产操作时回填
+
+## 2026-09-26 — D7 诊断通道准入上限（max_read_requests 落地）
+
+- 环境：`Windows 逻辑验证`
+- commit：见本条目对应提交（feat: diagnostic channel admission cap）
+- 命令：`uv run pytest tests/unit/test_gateway_service.py -q`
+- 结果：26 passed——灌满 max_read_requests 后新诊断请求 BUSY（retryable、
+  retry_after≥1）且不建 job；job 终态后额度回收；诊断积压 5 个不再挤占
+  变更容量判定（per_target=2 仍可接纳变更）；既有维护/阻断豁免回归通过
+- 实现注记：额度以库内 queued+running 诊断 job 计数（终态即回收，跨
+  Gateway 重启保持），优于纯进程内计数器（避免 pending 超时后额度泄漏）

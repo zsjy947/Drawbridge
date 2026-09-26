@@ -67,7 +67,7 @@ schema v2 前的存量 plan（无指纹）一律 `STALE_PLAN`，需重新 plan�
 | `INVALID_PARAMETER` | 参数形状/语义不通过 | 客户端修正；无需运维 |
 | `UNKNOWN_OPERATION` / `FORBIDDEN_OPERATION` | 未登记或内部操作 | 检查操作目录 |
 | `IDEMPOTENCY_CONFLICT` | 同键不同内容 | 客户端换新幂等键 |
-| `BUSY` / `RATE_LIMITED` | 队列满 / 部署冷却未到 | 按 retry_after 等待 |
+| `BUSY` / `RATE_LIMITED` | 队列满 / 诊断通道饱和 / 部署冷却未到 | 按 retry_after 等待；诊断通道饱和由 `concurrency.max_read_requests` 限制（在途诊断 job 计数，终态自动回收额度） |
 | `QUEUE_TIMEOUT` | 排队超时未执行 | 重新提交（新 plan 若过期） |
 | `STALE_PLAN` | 计划过期/基线变化/配置变化/模板指纹变化 | 重新 plan |
 | `DRIFT_DETECTED` | 人工改动与登记基线不一致 | 核实现场后 reconcile |

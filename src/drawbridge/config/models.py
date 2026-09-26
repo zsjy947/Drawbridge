@@ -625,6 +625,15 @@ class AuthConfig(StrictModel):
 
 
 class ConcurrencyConfig(StrictModel):
+    """Admission and execution concurrency knobs.
+
+    ``max_read_requests`` caps the diagnostic channel: the Gateway rejects a
+    new read request with BUSY while ``max_read_requests`` admitted-but-not-
+    terminal diagnostic jobs exist (queued or running, counted from the
+    store — quota recycles on terminal states and survives gateway
+    restarts).  Diagnostic jobs never consume the mutation capacity below.
+    """
+
     max_read_requests: int = Field(default=16, ge=1, le=256)
     max_running_jobs: int = Field(default=1, ge=1, le=8)
     max_queued_jobs: int = Field(default=50, ge=1, le=1000)

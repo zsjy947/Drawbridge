@@ -22,6 +22,7 @@ from drawbridge.config.models import (
     OperationConfig,
 )
 from drawbridge.errors import (
+    BusyError,
     DrawbridgeError,
     ErrorCode,
     ForbiddenOperationError,
@@ -148,6 +149,24 @@ class GatewayService:
     def _wait_budget(self) -> float:
         return float(self.config.main.diagnostics.wait_budget_seconds)
 
+    async def _diagnostic_channel_full(self) -> bool:
+        """Admission-side cap for the diagnostic channel (plan D7).
+
+        ``concurrency.max_read_requests`` bounds the number of admitted-but-
+        not-yet-terminal diagnostic jobs.  Counted from the store (queued +
+        running), so terminal transitions recycle quota automatically —
+        including jobs whose HTTP wait already timed out — and the cap holds
+        across gateway restarts.  Advisory throttle: a slight overshoot
+        under racing admissions is harmless.
+        """
+        async with self.store.db.conn.execute(
+            "SELECT COUNT(*) AS n FROM jobs WHERE kind = ? AND status IN (?, ?)",
+            (JobKind.DIAGNOSTIC, JobStatus.QUEUED, JobStatus.RUNNING),
+        ) as cursor:
+            row = await cursor.fetchone()
+        limit = self.config.main.concurrency.max_read_requests
+        return int(row["n"]) >= limit
+
     async def _run_diagnostic(
         self,
         *,
@@ -159,6 +178,11 @@ class GatewayService:
         request_id: str,
     ) -> tuple[dict[str, Any] | None, str]:
         """Admit a diagnostic job and wait within the HTTP budget."""
+        if await self._diagnostic_channel_full():
+            raise BusyError(
+                "diagnostic channel is saturated; retry shortly",
+                retry_after_seconds=max(1, int(self._wait_budget() // 2)),
+            )
         job = await self.store.admit_job(
             kind=JobKind.DIAGNOSTIC,
             action=action,

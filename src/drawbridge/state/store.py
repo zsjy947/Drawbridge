@@ -329,16 +329,20 @@ class Store:
         max_queued: int,
         max_queued_per_target: int,
     ) -> None:
+        # Diagnostic jobs never consume mutation capacity (plan D7): they
+        # are throttled separately by concurrency.max_read_requests at the
+        # gateway, and their backlog must not starve change admission.
         async with conn.execute(
-            "SELECT COUNT(*) AS n FROM jobs WHERE status = ?", (JobStatus.QUEUED,)
+            "SELECT COUNT(*) AS n FROM jobs WHERE status = ? AND kind != ?",
+            (JobStatus.QUEUED, JobKind.DIAGNOSTIC),
         ) as cursor:
             row = await cursor.fetchone()
         if row["n"] >= max_queued:
             raise BusyError("mutation queue is full", retry_after_seconds=5)
         async with conn.execute(
             "SELECT COUNT(*) AS n FROM jobs WHERE status = ? AND app = ?"
-            " AND environment = ?",
-            (JobStatus.QUEUED, app, environment),
+            " AND environment = ? AND kind != ?",
+            (JobStatus.QUEUED, app, environment, JobKind.DIAGNOSTIC),
         ) as cursor:
             row = await cursor.fetchone()
         if row["n"] >= max_queued_per_target:
