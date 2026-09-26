@@ -152,3 +152,14 @@ sqlite3 -json /var/lib/drawbridge/state.db \
 - 升级 Python 依赖前先在 staging 目标跑完整 pytest 与自检；
 - state.db 使用 SQLite backup API 生成一致快照（不要只复制 db 文件而遗漏
   WAL）；schema 版本不匹配时拒绝启动，先完成迁移与备份。
+
+## 8. NPU 只读观测（systemd 部署注意）
+
+`npu_status` 是只读操作（host_observe profile），但 systemd 沙箱对设备节点
+有额外限制：**启用 `npu.enabled` 时必须同步在 `drawbridge-runner.service`
+的 DeviceAllow 列表放开登记的设备**（`/dev/davinci_manager` 与各
+`/dev/davinciN`），否则 `npu-smi` 在单元内被静默拒绝——nohup/前台部署不暴露
+此问题，切到 systemd 后才会失效。修改 unit 后 `systemctl daemon-reload &&
+systemctl restart drawbridge-runner`，并以 `npu_status` 实际返回验证。
+设备清单只放行 apps.yaml 登记的卡号，不做通配放行（见
+[DEPLOYMENT.md](DEPLOYMENT.md) §9）。

@@ -26,6 +26,9 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
+# state.db/WAL/SHM must stay group-writable: Gateway and Runner are two
+# accounts sharing the `drawbridge` group and one SQLite database.
+UMask=0007
 
 # Gateway-specific: state dir only; no raw devices.
 ReadWritePaths=/var/lib/drawbridge

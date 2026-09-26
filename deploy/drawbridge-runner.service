@@ -31,13 +31,25 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
+# state.db/WAL/SHM must stay group-writable: Gateway and Runner are two
+# accounts sharing the `drawbridge` group and one SQLite database.
+UMask=0007
 
 # Runner-specific: state, deploy roots, registered repos, build + logs;
 # AF_UNIX for the Docker/BuildKit sockets, INET for git fetch egress.
 ReadWritePaths=/var/lib/drawbridge /srv/drawbridge /var/log/drawbridge /run/drawbridge
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-# NPU device access for npu_status would need PrivateDevices=false plus a
-# DeviceAllow list; leave disabled until an NPU operation is registered.
+# Docker Engine socket access is group-based: the drawbridge-runner account
+# must be a member of `docker` (see docs/DEPLOYMENT.md §2).  Verify with
+# `sudo -u drawbridge-runner docker version` before first dispatch.
+SupplementaryGroups=docker
+# NPU read-only observation (npu_status) under systemd: PrivateDevices=false
+# plus an explicit DeviceAllow list is REQUIRED — without it the device nodes
+# are invisible even when npu.enabled is true (nohup deploys do not have this
+# restriction).  Enable together with the apps.yaml npu section and list only
+# the registered devices, e.g. for /dev/davinci2:
+#   DeviceAllow=/dev/davinci_manager rw
+#   DeviceAllow=/dev/davinci2 rw
 PrivateDevices=false
 DeviceAllow=char-uart rw
 

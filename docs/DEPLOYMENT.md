@@ -22,6 +22,11 @@ sudo groupadd --system drawbridge
 sudo useradd --system --gid drawbridge -m -d /var/lib/drawbridge-home/gateway drawbridge-gateway
 sudo useradd --system --gid drawbridge -m -d /var/lib/drawbridge-home/runtime drawbridge-runner
 
+# Docker Engine socket 组访问：Runner 账号必须加入 docker 组
+# （systemd 单元同时设置了 SupplementaryGroups=docker）
+sudo usermod -aG docker drawbridge-runner
+sudo -u drawbridge-runner docker version   # 必须成功，否则首次 load/ps/up 全部 permission denied
+
 # 目录
 sudo mkdir -p /etc/drawbridge/{compose,scripts,empty-hooks} \
               /var/lib/drawbridge/home/{source,runtime,observe,diagnostic} \
@@ -34,6 +39,13 @@ sudo chmod 2770 /var/lib/drawbridge /run/drawbridge /var/log/drawbridge
 
 > **不要把 Gateway 加入 docker 组。** Docker socket 等价主机 root；只有 Runner
 > （`drawbridge-runner` 账号）需要访问 `/var/run/docker.sock` 与 BuildKit socket。
+
+> **共享状态目录的文件权限**：`/var/lib/drawbridge/state.db` 及其 WAL/SHM 由
+> 先连接的进程创建，Gateway 与 Runner 是共组 `drawbridge` 的两个不同账号——
+> 两个 systemd 单元均设置了 `UMask=0007`（文件 0660 / 目录 2770），保证任一
+> 服务创建的 db/WAL/SHM 对组可写。手工 `sqlite3` reconcile 时以组内账号执行
+> （如既有惯例 `sudo -u drawbridge-runner sqlite3 ...`），避免以 root 生成
+> 组不可写的新文件。
 
 ## 3. 安装应用
 
