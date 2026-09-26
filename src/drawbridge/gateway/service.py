@@ -20,6 +20,7 @@ from drawbridge.config.models import (
     DrawbridgeConfig,
     ExecutionProfile,
     OperationConfig,
+    excludes_simulated_releases,
 )
 from drawbridge.errors import (
     BusyError,
@@ -410,8 +411,12 @@ class GatewayService:
 
     async def ops_status(self, app: str, environment: str) -> dict[str, Any]:
         request_id = self._request_id()
-        self._env_cfg(app, environment)
-        current = await self.store.get_current_release(app, environment)
+        env_cfg = self._env_cfg(app, environment)
+        current = await self.store.get_current_release(
+            app,
+            environment,
+            exclude_simulated=excludes_simulated_releases(env_cfg.runtime),
+        )
         running = await self.store.find_active_job(app, environment)
         result, job_id = await self._run_diagnostic(
             action="host_metrics",
@@ -578,7 +583,12 @@ class GatewayService:
             raise StalePlanError(
                 "compose template changed since the plan was created; re-plan"
             )
-        baseline = await self.store.get_current_release(plan.app, plan.environment)
+        apply_env = self._env_cfg(plan.app, plan.environment)
+        baseline = await self.store.get_current_release(
+            plan.app,
+            plan.environment,
+            exclude_simulated=excludes_simulated_releases(apply_env.runtime),
+        )
         baseline_id = baseline.release_id if baseline else None
         if plan.baseline_release_id != baseline_id:
             raise StalePlanError(
@@ -656,7 +666,7 @@ class GatewayService:
         stays reserved for operations that execute something.
         """
         request_id = self._request_id()
-        self._env_cfg(app, environment)
+        env_cfg = self._env_cfg(app, environment)
         if what not in ("releases", "jobs", "events"):
             raise InvalidParameterError(
                 "what must be one of releases, jobs, events"
@@ -676,8 +686,13 @@ class GatewayService:
             )
             has_more = len(releases) > limit
             releases = releases[:limit]
-            current = await self.store.get_current_release(app, environment)
+            current = await self.store.get_current_release(
+                app,
+                environment,
+                exclude_simulated=excludes_simulated_releases(env_cfg.runtime),
+            )
             current_id = current.release_id if current else None
+            exclude_sim = excludes_simulated_releases(env_cfg.runtime)
             rows = []
             for release in releases:
                 rows.append(
@@ -688,10 +703,14 @@ class GatewayService:
                         "status": release.status,
                         "created_at": release.created_at,
                         "rollback_of": release.rollback_of,
+                        "simulated": release.simulated,
                         "is_current": release.release_id == current_id,
+                        # D12: cross-runtime releases are never rollback
+                        # targets on a compose deployment.
                         "rollback_eligible": (
                             release.status in ("succeeded", "rollback", "superseded")
                             and release.release_id != current_id
+                            and not (release.simulated and exclude_sim)
                         ),
                     }
                 )
@@ -778,17 +797,27 @@ class GatewayService:
         parent_task_id: str | None = None,
     ) -> dict[str, Any]:
         request_id = self._request_id()
-        self._env_cfg(app, environment)
+        rb_env = self._env_cfg(app, environment)
         validate_reason(reason)
         validate_idempotency_key(idempotency_key)
         release = await self.store.get_release(release_id)
         if release.app != app or release.environment != environment:
             raise UnknownReleaseError("release belongs to a different target")
+        if release.simulated and rb_env.runtime != "simulation":
+            raise InvalidParameterError(
+                "release was produced by the simulation runtime and cannot "
+                "be rolled back to on a compose target (its image does not "
+                "exist in the Engine); pick a compose-era release"
+            )
         if release.status not in ("succeeded", "rollback", "superseded"):
             raise UnknownReleaseError(
                 f"release {release_id} cannot be rolled back to (status {release.status})"
             )
-        current = await self.store.get_current_release(app, environment)
+        current = await self.store.get_current_release(
+            app,
+            environment,
+            exclude_simulated=excludes_simulated_releases(rb_env.runtime),
+        )
         if current is not None and current.release_id == release_id:
             raise InvalidParameterError("release is already the current one")
         return await self._admit_write(
@@ -818,7 +847,11 @@ class GatewayService:
         env_cfg = self._env_cfg(release.app, release.environment)
         if suite not in env_cfg.test_suites:
             raise InvalidParameterError(f"suite {suite!r} is not registered")
-        current = await self.store.get_current_release(release.app, release.environment)
+        current = await self.store.get_current_release(
+            release.app,
+            release.environment,
+            exclude_simulated=excludes_simulated_releases(env_cfg.runtime),
+        )
         if current is None or current.release_id != release_id:
             raise StalePlanError("tests must target the currently deployed release")
         return await self._admit_write(

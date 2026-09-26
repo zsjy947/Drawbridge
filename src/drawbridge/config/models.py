@@ -60,6 +60,14 @@ def check_no_control_chars(value: str, *, field: str) -> str:
     return value
 
 
+def excludes_simulated_releases(runtime: str) -> bool:
+    """Cross-runtime baseline rule (plan D12): a ``compose`` target must
+    exclude simulation-era releases from current/baseline computations (the
+    synthetic image id does not exist in the Engine); simulation targets keep
+    them — they are their legitimate baselines."""
+    return runtime == "compose"
+
+
 class StrictModel(BaseModel):
     """Base model: forbid extra fields, disable all implicit coercion."""
 

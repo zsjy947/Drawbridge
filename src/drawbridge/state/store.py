@@ -991,14 +991,32 @@ class Store:
         return row_to_release(row)
 
     async def get_current_release(
-        self, app: str, environment: str
+        self, app: str, environment: str, *, exclude_simulated: bool = False
     ) -> ReleaseRecord | None:
-        async with self.db.conn.execute(
-            "SELECT * FROM releases WHERE app = ? AND environment = ?"
-            " AND status IN ('succeeded', 'rollback')"
-            " ORDER BY created_at DESC LIMIT 1",
-            (app, environment),
-        ) as cursor:
+        """Latest succeeded/rollback release for one target.
+
+        ``exclude_simulated`` implements the cross-runtime baseline identity
+        (plan D12): a compose target must never treat a simulation-era
+        release as its current/baseline — the synthetic image id does not
+        exist in the Engine, so restore paths would fail misleadingly.
+        Callers that know the target's runtime pass
+        ``exclude_simulated=(runtime == 'compose')``; simulation targets
+        keep the unfiltered view (sim releases are their legitimate
+        baselines).
+        """
+        if exclude_simulated:
+            query = (
+                "SELECT * FROM releases WHERE app = ? AND environment = ?"
+                " AND status IN ('succeeded', 'rollback') AND simulated = 0"
+                " ORDER BY created_at DESC LIMIT 1"
+            )
+        else:
+            query = (
+                "SELECT * FROM releases WHERE app = ? AND environment = ?"
+                " AND status IN ('succeeded', 'rollback')"
+                " ORDER BY created_at DESC LIMIT 1"
+            )
+        async with self.db.conn.execute(query, (app, environment)) as cursor:
             row = await cursor.fetchone()
         return row_to_release(row) if row is not None else None
 

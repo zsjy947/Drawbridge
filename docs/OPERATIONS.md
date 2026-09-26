@@ -188,7 +188,28 @@ sqlite3 -json /var/lib/drawbridge/state.db \
 - state.db 使用 SQLite backup API 生成一致快照（不要只复制 db 文件而遗漏
   WAL）；schema 版本不匹配时拒绝启动，先完成迁移与备份。
 
-## 8. NPU 只读观测（systemd 部署注意）
+## 8. 运行时模式切换（simulation → compose）
+
+`runtime` 是 apps.yaml 的管理员字段：改 YAML + 重启 Gateway/Runner 即完成
+切换（config_digest 变化使存量 plan 作废，属设计使然）。**切换不迁移历史
+release**：simulation 时代的 release 带有合成镜像 ID（Engine 中不存在），
+在 compose 目标上会被排除出 current/基线计算（schema v2 的 `simulated`
+标记，存量行由 evidence 的 `validation_level: simulation` 在迁移时回填）：
+
+- **切换后首次部署回到无基线语义**：plan 的基线为 None；失败走
+  `stop_initial` → `FAILED_NO_BASELINE`，干净不阻断——而不是拿合成镜像渲染
+  compose up `--pull never` 必然失败 → `ROLLBACK_FAILED` 阻断目标；
+- **显式回滚到 simulation release 被拒**（`INVALID_PARAMETER`，信息说明
+  异源）；`ops_status` 的 current、`ops_history` 的 `is_current`/
+  `rollback_eligible`（sim release 不再标可回滚）跟随同一过滤；
+- **恢复/回滚前的快失败防御**：compose up 之前先
+  `docker image inspect <基线镜像>`——基线镜像不在 Engine 中（simulated 或
+  已被人工清理）时返回结构化 `ROLLBACK_FAILED`（提示人工 reconcile），
+  替代 `--pull never` 的误导性报错；该防御对"基线镜像被人工清理"的真实
+  漂移同样生效；
+- **simulation 目标行为完全不变**：sim release 仍是其合法基线与回滚目标。
+
+## 9. NPU 只读观测（systemd 部署注意）
 
 `npu_status` 是只读操作（host_observe profile），但 systemd 沙箱对设备节点
 有额外限制：**启用 `npu.enabled` 时必须同步在 `drawbridge-runner.service`
@@ -197,4 +218,4 @@ sqlite3 -json /var/lib/drawbridge/state.db \
 此问题，切到 systemd 后才会失效。修改 unit 后 `systemctl daemon-reload &&
 systemctl restart drawbridge-runner`，并以 `npu_status` 实际返回验证。
 设备清单只放行 apps.yaml 登记的卡号，不做通配放行（见
-[DEPLOYMENT.md](DEPLOYMENT.md) §9）。
+[DEPLOYMENT.md](DEPLOYMENT.md) §9 NPU 接入约定）。

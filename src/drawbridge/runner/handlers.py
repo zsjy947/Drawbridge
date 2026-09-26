@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from drawbridge.config.compose_template import read_compose_template
-from drawbridge.config.models import DrawbridgeConfig
+from drawbridge.config.models import DrawbridgeConfig, excludes_simulated_releases
 from drawbridge.errors import DrawbridgeError, ErrorCode
 from drawbridge.executor.process import ProcessManager
 from drawbridge.executor.spec import (
@@ -135,8 +135,12 @@ async def run_release_plan(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
         git_ref=job.params["git_ref"],
     )
     workflow = job.params.get("workflow", "deploy_verify")
-    baseline = await ctx.store.get_current_release(app_id, job.environment)
     env_cfg = ctx.config.environment(app_id, job.environment)
+    baseline = await ctx.store.get_current_release(
+        app_id,
+        job.environment,
+        exclude_simulated=excludes_simulated_releases(env_cfg.runtime),
+    )
     # Template fingerprint frozen into the plan (D3): structure is re-validated
     # here and at apply time; NULL-digest (legacy) plans are always stale.
     template = read_compose_template(env_cfg.compose_file, list(env_cfg.services))
@@ -486,7 +490,11 @@ async def _compose_command(
     from drawbridge.executor.spec import ExecutionSpec
 
     app_cfg = ctx.config.environment(job.app, job.environment)
-    release = await ctx.store.get_current_release(job.app, job.environment)
+    release = await ctx.store.get_current_release(
+        job.app,
+        job.environment,
+        exclude_simulated=excludes_simulated_releases(app_cfg.runtime),
+    )
     release_dir = release.deploy_dir if release else app_cfg.deploy_root
     compose_file = app_cfg.compose_file
     prefix = [
@@ -579,7 +587,11 @@ async def run_service_restart(ctx: JobContext, job: JobRecord) -> dict[str, Any]
 
 async def _compose_prefix(ctx: JobContext, job: JobRecord) -> list[str]:
     env_cfg = ctx.config.environment(job.app, job.environment)
-    release = await ctx.store.get_current_release(job.app, job.environment)
+    release = await ctx.store.get_current_release(
+        job.app,
+        job.environment,
+        exclude_simulated=excludes_simulated_releases(env_cfg.runtime),
+    )
     return [
         "compose",
         "--ansi",
@@ -635,10 +647,18 @@ async def run_npu_status(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
 async def run_release_rollback(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
     """Redeploy a historical release's frozen artifacts as a new release."""
     runtime = ctx.runtime()
+    env_runtime = ctx.runtime_mode(job.app, job.environment)
     target = await ctx.store.get_release(str(job.params["release_id"]))
     if target.app != job.app or target.environment != job.environment:
         raise DrawbridgeError(
             "release belongs to a different target", code=ErrorCode.INVALID_PARAMETER
+        )
+    if target.simulated and env_runtime != "simulation":
+        raise DrawbridgeError(
+            "release was produced by the simulation runtime and cannot be "
+            "restored on a compose target (its image does not exist in the "
+            "Engine); pick a compose-era release or re-plan a fresh deploy",
+            code=ErrorCode.INVALID_PARAMETER,
         )
     if target.status not in ("succeeded", "rollback", "superseded"):
         raise DrawbridgeError(
@@ -660,6 +680,7 @@ async def run_release_rollback(ctx: JobContext, job: JobRecord) -> dict[str, Any
         image_id=target.image_id,
         image_tag=target.image_tag,
         config_digest=ctx.config.digest,
+        simulated=env_runtime == "simulation",
         status="rollback",
         rollback_of=target.release_id,
         compose_path=restore.get("compose_file"),
@@ -700,7 +721,13 @@ async def run_test_suite(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
     """Run one registered suite against the currently deployed release."""
     runtime = ctx.runtime()
     release = await ctx.store.get_release(str(job.params["release_id"]))
-    current = await ctx.store.get_current_release(job.app, job.environment)
+    current = await ctx.store.get_current_release(
+        job.app,
+        job.environment,
+        exclude_simulated=excludes_simulated_releases(
+            ctx.runtime_mode(job.app, job.environment)
+        ),
+    )
     if current is None or current.release_id != release.release_id:
         raise DrawbridgeError(
             "tests must target the currently deployed release",

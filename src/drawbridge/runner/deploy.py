@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from drawbridge.config.compose_template import read_compose_template
-from drawbridge.config.models import DrawbridgeConfig
+from drawbridge.config.models import DrawbridgeConfig, excludes_simulated_releases
 from drawbridge.errors import DrawbridgeError, ErrorCode, StalePlanError
 from drawbridge.state.records import (
     JobRecord,
@@ -154,6 +154,9 @@ class DeployWorkflow:
             finalize_result, staged = await self._finalize(job, state)
             return JobStatus.SUCCEEDED, finalize_result, None, staged
 
+        env_cfg_runtime = self.config.environment(
+            state.app, state.environment
+        ).runtime
         recovery = None
         if state.runtime_change_started:
             recovery = await self._recover(job, state, failure)
@@ -165,7 +168,11 @@ class DeployWorkflow:
             },
             "steps_completed": completed_steps,
             "current_release": _release_dict(
-                await self.store.get_current_release(state.app, state.environment)
+                await self.store.get_current_release(
+                    state.app,
+                    state.environment,
+                    exclude_simulated=excludes_simulated_releases(env_cfg_runtime),
+                )
             ),
         }
         return final_status, result, recovery, None
@@ -183,7 +190,11 @@ class DeployWorkflow:
         template = read_compose_template(env_cfg.compose_file, list(env_cfg.services))
         if plan.compose_template_digest != template.digest:
             raise StalePlanError("compose template changed since planning")
-        baseline = await self.store.get_current_release(plan.app, plan.environment)
+        baseline = await self.store.get_current_release(
+            plan.app,
+            plan.environment,
+            exclude_simulated=excludes_simulated_releases(env_cfg.runtime),
+        )
         baseline_id = baseline.release_id if baseline else None
         if plan.baseline_release_id != baseline_id:
             raise StalePlanError("baseline release changed since planning")
@@ -232,6 +243,7 @@ class DeployWorkflow:
             image_id=state.image_id,
             image_tag=state.image_tag,
             config_digest=self.config.digest,
+            simulated=env_cfg.runtime == "simulation",
             status="succeeded",
             rollback_of=None,
             compose_path=str(rendered_compose) if rendered_compose else env_cfg.compose_file,

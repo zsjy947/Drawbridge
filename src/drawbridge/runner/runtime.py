@@ -717,6 +717,33 @@ class DeployRuntime:
             )
         return {"suite": suite_name, **result}
 
+    async def _verify_baseline_image_in_engine(
+        self, state_or_none: DeployState | None, image_id: str, *, app: str, environment: str
+    ) -> None:
+        """Fast-fail defense (plan D12): the baseline image must exist in the
+        Engine BEFORE compose up ``--pull never`` renders a misleading
+        failure inside the recovery path (which would end in
+        ROLLBACK_FAILED blocking the target).  Catches both simulation-era
+        baselines on a switched runtime and images pruned by hand."""
+        probe = await self._docker(
+            "baseline_image_check",
+            ["image", "inspect", "--format", "{{.Id}}", image_id],
+            state_or_none,
+            cwd=self.config.environment(app, environment).deploy_root
+            if state_or_none is None
+            else None,
+            timeout=10.0,
+            max_bytes=4096,
+        )
+        if not probe.accepted:
+            raise DrawbridgeError(
+                f"baseline image {image_id} is not present in the Docker "
+                "Engine (simulation-era release on a compose target, or the "
+                "image was pruned by hand); recovery cannot proceed — "
+                "reconcile the scene manually per OPERATIONS.md §3",
+                code=ErrorCode.ROLLBACK_FAILED,
+            )
+
     async def step_restore_previous(
         self, state: DeployState, params: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -727,6 +754,9 @@ class DeployRuntime:
                 code=ErrorCode.ROLLBACK_FAILED,
             )
         env_cfg = self._env_cfg(state)
+        await self._verify_baseline_image_in_engine(
+            state, baseline.image_id, app=state.app, environment=state.environment
+        )
         rendered = self._render_compose(env_cfg, baseline.image_id)
         prefix = self._compose_prefix_for(env_cfg, rendered)
         result = await self._docker(
@@ -921,6 +951,9 @@ class DeployRuntime:
                 code=ErrorCode.ROLLBACK_FAILED,
             )
         env_cfg = self.config.environment(app, environment)
+        await self._verify_baseline_image_in_engine(
+            None, release.image_id, app=app, environment=environment
+        )
         rendered = self._render_compose(env_cfg, release.image_id)
         prefix = self._compose_prefix_for(env_cfg, rendered)
         up = await self._docker(

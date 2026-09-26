@@ -207,3 +207,20 @@
   SKIP、gitconfig/ssh-wrapper/脚本缺失 WARN；模板注释补多服务单镜像锚点写法
 - 注记：模板注释中不可出现完整 token 字面量（计数含注释，已用占位描述）；
   simulation preflight 覆写为仅磁盘/基线检查（适配器不触 compose）
+
+
+## 2026-09-26 — D12 运行时模式切换的基线语义（simulation→compose 迁移）
+
+- 环境：`Windows 逻辑验证`
+- commit：见本条目对应提交（feat: cross-runtime baseline identity）
+- 命令：`uv run pytest tests/unit/test_mode_switch.py -q`；全量
+  `uv run pytest -q`
+- 结果：6 passed + 全量 343 passed——存在 sim release 时切 compose：plan
+  基线为 None、恢复走 stop_initial（FAILED_NO_BASELINE 而非
+  ROLLBACK_FAILED）；显式回滚 sim release 被拒（INVALID_PARAMETER，信息
+  说明异源）；history 中 sim release 不再标 rollback_eligible 且带
+  simulated 标记；simulation 目标视图不回归；restore_previous 前的
+  Engine 镜像探针快失败（仅 baseline_image_check 执行，无 compose up），
+  错误信息指向人工 reconcile
+- 未验收：910B 切模式场景（sim 时代 release 不作为 compose 基线/current，
+  首部署失败走 failed_no_baseline）——待切生产操作时回填
