@@ -118,9 +118,17 @@ socket 对端地址而非 `X-Forwarded-For`。不要把 Gateway 放到反向代�
 
 ```bash
 sudo /opt/drawbridge/venv/bin/drawbridge-selfcheck --config-dir /etc/drawbridge
+# simulation / 仅网关部署（无 Docker/BuildKit 的环境）：
+drawbridge-selfcheck --config-dir ~/drawbridge-run/etc --role simulation
 ```
 
-自检真实验证：Python 版本、四份配置加载、状态目录可写（SQLite WAL 需本地
+`--role {gateway,runner,simulation,all}`（默认 all 保持既有行为，plan D6）：
+gateway/simulation 角色把 buildkit socket、docker/compose 检查降为 SKIP 行
+（不计入 failed——910B simulation 部署不再被无关 WARN/FAIL 干扰）；runner
+保持全检。Python `>=3.12` 是硬门槛（输出 `runtime_baseline: Python >=3.12`，
+版本不符直接 FAIL）。
+
+自检真实验证：Python 版本门槛、四份配置加载、状态目录可写（SQLite WAL 需本地
 文件系统）、git/docker/compose 可用且版本被记录、rootless BuildKit socket
 存在、登记仓库已克隆、磁盘预算余量，以及**操作目录一致性**——operations.yaml
 /workflows.yaml 中每个 handler 操作都必须有对应代码实现（executable 操作必须

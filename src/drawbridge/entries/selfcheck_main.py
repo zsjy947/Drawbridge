@@ -22,6 +22,7 @@ class CheckResult:
         self.passed = 0
         self.failed: list[str] = []
         self.warnings: list[str] = []
+        self.skipped: list[str] = []
 
     def ok(self, name: str, detail: str = "") -> None:
         self.passed += 1
@@ -35,14 +36,33 @@ class CheckResult:
         self.warnings.append(name)
         print(f"  [WARN] {name} — {detail}")
 
+    def skip(self, name: str, detail: str) -> None:
+        """Role-scoped opt-out (plan D6): not applicable to this role, so it
+        neither passes nor fails — a WARN/FAIL here only misled simulation
+        deployments."""
+        self.skipped.append(name)
+        print(f"  [SKIP] {name} — {detail}")
 
-def run_checks(config_dir: str) -> CheckResult:
+
+#: Roles whose checks intentionally omit the container/build toolchain.
+_BUILDLESS_ROLES = frozenset({"gateway", "simulation"})
+
+
+def run_checks(config_dir: str, role: str = "all") -> CheckResult:
     configure_logging(dev_mode=True)
     results = CheckResult()
 
-    # 1. Python version (informational on this entrypoint; the package
-    # itself requires 3.12+ at install time)
-    results.ok("python runtime", f"{sys.version_info.major}.{sys.version_info.minor}")
+    # 1. Python hard gate (plan D6): the package requires 3.12+ — report the
+    # baseline explicitly instead of merely printing the version.
+    python_ok = sys.version_info >= (3, 12)
+    detail = (
+        f"{sys.version_info.major}.{sys.version_info.minor} "
+        f"(runtime_baseline: Python >=3.12)"
+    )
+    if python_ok:
+        results.ok("python runtime", detail)
+    else:
+        results.fail("python runtime", f"{detail} NOT satisfied")
 
     # 2. Configuration loads
     try:
@@ -63,13 +83,20 @@ def run_checks(config_dir: str) -> CheckResult:
     except OSError as exc:
         results.fail("state dir writable", str(exc))
 
-    # 4. Toolchain binaries exist and report versions
+    # 4. Toolchain binaries exist and report versions.  Docker is a Runner
+    # concern: gateway/simulation roles skip it instead of warning.
+    buildless = role in _BUILDLESS_ROLES
     for tool_name, version_args in (
         ("git", ["--version"]),
         ("docker", ["version", "--format", "{{.Server.Version}}"]),
     ):
         tool_path = getattr(config.main.toolchain, tool_name, "")
         if not tool_path or not Path(tool_path).exists():
+            if tool_name == "docker" and buildless:
+                results.skip(
+                    "toolchain docker", f"not required for role {role!r}"
+                )
+                continue
             severity = results.fail if tool_name == "git" else results.warn
             severity(f"toolchain {tool_name}", f"{tool_path!r} not found")
             continue
@@ -83,11 +110,16 @@ def run_checks(config_dir: str) -> CheckResult:
             )
             results.ok(f"toolchain {tool_name}", proc.stdout.strip()[:80])
         except (OSError, subprocess.SubprocessError) as exc:
-            results.warn(f"toolchain {tool_name}", f"present but unusable: {exc}")
+            if tool_name == "docker" and buildless:
+                results.skip(f"toolchain {tool_name}", f"role {role!r}: {exc}")
+            else:
+                results.warn(f"toolchain {tool_name}", f"present but unusable: {exc}")
 
-    # 5. Compose --wait / --pull never support (best-effort probe)
+    # 5. Compose --wait / --pull never support (best-effort probe; Runner only)
     docker_path = config.main.toolchain.docker
-    if Path(docker_path).exists():
+    if buildless:
+        results.skip("docker compose", f"not required for role {role!r}")
+    elif Path(docker_path).exists():
         try:
             proc = subprocess.run(
                 [docker_path, "compose", "version", "--short"],
@@ -100,26 +132,29 @@ def run_checks(config_dir: str) -> CheckResult:
         except (OSError, subprocess.SubprocessError) as exc:
             results.warn("docker compose", str(exc))
 
-    # 6. Rootless BuildKit socket
-    buildkit_ok = False
-    missing_sockets: list[str] = []
-    for app_id, app in config.apps.items():
-        for env_name, env in app.environments.items():
-            socket_path = env.buildkit_socket
-            if not socket_path:
-                missing_sockets.append(f"{app_id}/{env_name}")
-                continue
-            if Path(socket_path).exists():
-                buildkit_ok = True
-            else:
-                missing_sockets.append(f"{app_id}/{env_name} ({socket_path})")
-    if buildkit_ok:
-        results.ok("rootless buildkit socket present")
+    # 6. Rootless BuildKit socket (Runner concern; gateway/simulation skip)
+    if buildless:
+        results.skip("rootless buildkit socket present", f"not required for role {role!r}")
     else:
-        results.warn(
-            "rootless buildkit socket present",
-            f"deployment features blocked; missing for {missing_sockets or 'all apps'}",
-        )
+        buildkit_ok = False
+        missing_sockets: list[str] = []
+        for app_id, app in config.apps.items():
+            for env_name, env in app.environments.items():
+                socket_path = env.buildkit_socket
+                if not socket_path:
+                    missing_sockets.append(f"{app_id}/{env_name}")
+                    continue
+                if Path(socket_path).exists():
+                    buildkit_ok = True
+                else:
+                    missing_sockets.append(f"{app_id}/{env_name} ({socket_path})")
+        if buildkit_ok:
+            results.ok("rootless buildkit socket present")
+        else:
+            results.warn(
+                "rootless buildkit socket present",
+                f"deployment features blocked; missing for {missing_sockets or 'all apps'}",
+            )
 
     # 7. Registered repos exist with expected origin config
     for app_id, app in config.apps.items():
@@ -189,12 +224,23 @@ def run_checks(config_dir: str) -> CheckResult:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="drawbridge-selfcheck")
     parser.add_argument("--config-dir", default="/etc/drawbridge")
+    parser.add_argument(
+        "--role",
+        choices=["gateway", "runner", "simulation", "all"],
+        default="all",
+        help=(
+            "scope the checks to one deployment role (plan D6): gateway and"
+            " simulation skip the docker/compose/buildkit checks (SKIP lines,"
+            " never warnings or failures); runner keeps the full set; all"
+            " preserves the historical behaviour"
+        ),
+    )
     args = parser.parse_args(argv)
-    print("Drawbridge installation self-check")
-    results = run_checks(args.config_dir)
+    print(f"Drawbridge installation self-check (role: {args.role})")
+    results = run_checks(args.config_dir, role=args.role)
     print(
         f"\n{results.passed} passed, {len(results.failed)} failed, "
-        f"{len(results.warnings)} warnings"
+        f"{len(results.warnings)} warnings, {len(results.skipped)} skipped"
     )
     if results.warnings:
         print("warnings disable features but do not block startup")

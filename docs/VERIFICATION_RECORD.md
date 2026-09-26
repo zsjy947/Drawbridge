@@ -132,3 +132,15 @@
   同节良性键负例）；正常仓库全流程通过；`gc.auto=0` 出现在每次实际
   git argv 断言；全量 320 passed
 - 未验收：910B 真实仓库正常 fetch——待切生产操作时回填
+
+## 2026-09-26 — D6 selfcheck --role 与 Python 硬门槛
+
+- 环境：`Windows 逻辑验证`
+- commit：见本条目对应提交（feat: selfcheck role scoping and python hard gate）
+- 命令：`uv run pytest tests/unit/test_selfcheck_roles.py -q`；
+  `uv run python -m drawbridge.entries.selfcheck_main --config-dir configs
+  --role simulation`（实跑：5 passed / 1 failed[git 路径，dev 主机预期] /
+  3 skipped，容器类检查全部 SKIP 不再 WARN）
+- 结果：6 passed——四角色快照差异断言（gateway/simulation 的 skip 计数 >
+  all、runner == all）、simulation/gateway 角色退出码 0、Python 基线行
+- 未验收：910B 以 simulation 角色自检 0 failed——待切生产操作时回填
