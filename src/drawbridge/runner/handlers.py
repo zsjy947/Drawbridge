@@ -16,6 +16,7 @@ from datetime import UTC
 from pathlib import Path
 from typing import Any
 
+from drawbridge.config.compose_template import read_compose_template
 from drawbridge.config.models import DrawbridgeConfig
 from drawbridge.errors import DrawbridgeError, ErrorCode
 from drawbridge.executor.process import ProcessManager
@@ -129,6 +130,10 @@ async def run_release_plan(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
     )
     workflow = job.params.get("workflow", "deploy_verify")
     baseline = await ctx.store.get_current_release(app_id, job.environment)
+    env_cfg = ctx.config.environment(app_id, job.environment)
+    # Template fingerprint frozen into the plan (D3): structure is re-validated
+    # here and at apply time; NULL-digest (legacy) plans are always stale.
+    template = read_compose_template(env_cfg.compose_file, list(env_cfg.services))
 
     status_summary: dict[str, Any] | None = None
     try:
@@ -153,6 +158,7 @@ async def run_release_plan(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
             "workspace_status": status_summary,
         },
         request_id=job.request_id,
+        compose_template_digest=template.digest,
     )
     await ctx.store.append_event(
         "plan_created",
@@ -176,6 +182,7 @@ async def run_release_plan(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
         "resolved_via": resolution.resolved_via,
         "mapped_ref": resolution.mapped_ref,
         "baseline_release_id": baseline.release_id if baseline else None,
+        "compose_services": template.services,
         "expires_at": plan.expires_at,
         "plan_status": plan.status,
     }

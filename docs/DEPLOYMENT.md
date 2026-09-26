@@ -77,7 +77,14 @@ sudo chmod 640 /etc/drawbridge/*.yaml /etc/drawbridge/compose/*
   `linux/arm64`）/ compose_file / 健康检查 URL / 服务名 / 测试镜像 ID（冻结）/
   buildkit_socket / disk_budget_bytes；
 - `/etc/drawbridge/compose/demo.staging.yaml`：管理员模板，业务 env_file 以固定
-  路径引用（密钥由管理员手工放置，Drawbridge 不读取不返回）。
+  路径引用（密钥由管理员手工放置，Drawbridge 不读取不返回）。模板结构受
+  强制校验（plan D3）：顶层 `services` 非空、恰好一个 `REPLACE_BY_DRAWBRIDGE`
+  image token（多服务共用镜像用 YAML 锚点：`x-image: &img` + `image: *img`）、
+  服务名集合与 apps.yaml 的 `services` 完全一致；修改模板会使已排队的 plan
+  返回 `STALE_PLAN`（指纹冻结，注释/键序不敏感）。
+- **升级注意**：state.db schema v1→v2 在启动时自动迁移（plans 增模板指纹列、
+  releases 增 simulated 列）；迁移后存量 plan 一律 `STALE_PLAN`，选择无排队
+  job 的窗口重启并在客户端重新 plan→apply。
 
 ## 5. 预克隆仓库与测试镜像
 

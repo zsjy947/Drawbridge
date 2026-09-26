@@ -24,6 +24,9 @@ async def setup(tmp_path: Path):
     config.main.paths.lock_dir = str(tmp_path / "locks")
     config.main.paths.log_dir = str(tmp_path / "logs")
     config.main.concurrency.min_deploy_interval_seconds = 0
+    from tests.conftest import install_compose_template
+
+    install_compose_template(config, tmp_path)
     database = Database(tmp_path / "state" / "state.db")
     await database.connect()
     await database.initialize()
@@ -216,6 +219,12 @@ class TestMutationSerialization:
 
 async def admit_deploy(config, store: Store) -> Any:
     """A deploy job bound to a fresh, valid plan for the demo app."""
+    from drawbridge.config.compose_template import read_compose_template
+
+    env_cfg = config.environment("demo", "staging")
+    digest = read_compose_template(
+        env_cfg.compose_file, list(env_cfg.services)
+    ).digest
     plan = await store.create_plan(
         app="demo",
         environment="staging",
@@ -227,6 +236,7 @@ async def admit_deploy(config, store: Store) -> Any:
         baseline_release_id=None,
         ttl_seconds=900,
         params={},
+        compose_template_digest=digest,
     )
     return await store.admit_job(
         kind=JobKind.DEPLOY,

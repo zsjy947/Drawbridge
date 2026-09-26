@@ -12,7 +12,11 @@ from pathlib import Path
 
 import aiosqlite
 
-from drawbridge.state.schema import SCHEMA_STATEMENTS, SCHEMA_VERSION
+from drawbridge.state.schema import (
+    MIGRATIONS_V1_TO_V2,
+    SCHEMA_STATEMENTS,
+    SCHEMA_VERSION,
+)
 
 _BUSY_TIMEOUT_MS = 5000
 
@@ -54,29 +58,62 @@ class Database:
         return self._conn
 
     async def initialize(self) -> None:
-        """Create the schema if absent and verify the version (fail closed)."""
+        """Create/migrate the schema and verify the version (fail closed).
+
+        Fresh databases get the current schema directly.  An existing
+        version-1 database is upgraded in place inside one transaction
+        (``MIGRATIONS_V1_TO_V2``); anything newer or unreadable is refused —
+        never start against a schema this code does not understand.
+        """
         conn = self.conn
-        async with self._write_lock:
-            for statement in SCHEMA_STATEMENTS:
-                await conn.execute(statement)
-            await conn.execute(
-                "INSERT INTO control_state(key, value, updated_at) "
-                "VALUES('schema_version', ?, strftime('%s','now') * 1.0) "
-                "ON CONFLICT(key) DO NOTHING",
-                (str(SCHEMA_VERSION),),
-            )
-            await conn.execute(
-                "INSERT INTO control_state(key, value, updated_at) "
-                "VALUES('maintenance', 'false', strftime('%s','now') * 1.0) "
-                "ON CONFLICT(key) DO NOTHING"
-            )
-            await conn.commit()
+        async with self.write_lock():
+            await conn.execute("BEGIN IMMEDIATE")
+            try:
+                for statement in SCHEMA_STATEMENTS:
+                    await conn.execute(statement)
+                await conn.execute(
+                    "INSERT INTO control_state(key, value, updated_at) "
+                    "VALUES('schema_version', ?, strftime('%s','now') * 1.0) "
+                    "ON CONFLICT(key) DO NOTHING",
+                    (str(SCHEMA_VERSION),),
+                )
+                await conn.execute(
+                    "INSERT INTO control_state(key, value, updated_at) "
+                    "VALUES('maintenance', 'false', strftime('%s','now') * 1.0) "
+                    "ON CONFLICT(key) DO NOTHING"
+                )
+                row = await self._control_value(conn, "schema_version")
+                found = int(row) if row is not None else SCHEMA_VERSION
+                if found < SCHEMA_VERSION:
+                    if found != 1:
+                        raise RuntimeError(
+                            f"no migration path from schema version {found}"
+                        )
+                    for statement in MIGRATIONS_V1_TO_V2:
+                        await conn.execute(statement)
+                    await conn.execute(
+                        "UPDATE control_state SET value = ?, updated_at ="
+                        " strftime('%s','now') * 1.0 WHERE key = 'schema_version'",
+                        (str(SCHEMA_VERSION),),
+                    )
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
         row = await self.get_control("schema_version")
         if row is None or int(row) != SCHEMA_VERSION:
             raise RuntimeError(
                 f"state database schema version mismatch: expected {SCHEMA_VERSION}, "
                 f"found {row!r}; run the migration/backup procedure before starting"
             )
+
+    @staticmethod
+    async def _control_value(conn: aiosqlite.Connection, key: str) -> str | None:
+        async with conn.execute(
+            "SELECT value FROM control_state WHERE key = ?", (key,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row["value"] if row is not None else None
 
     # -- control_state ------------------------------------------------------
 

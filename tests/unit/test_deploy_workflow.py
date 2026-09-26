@@ -62,15 +62,20 @@ async def setup(tmp_path: Path):
     config.main.paths.state_dir = str(tmp_path / "state")
     config.main.paths.lock_dir = str(tmp_path / "locks")
     config.main.paths.log_dir = str(tmp_path / "logs")
+    from tests.conftest import install_compose_template
+
+    template_digest = install_compose_template(config, tmp_path)
     database = Database(tmp_path / "state" / "state.db")
     await database.connect()
     await database.initialize()
     store = Store(database)
-    yield config, store
+    yield config, store, template_digest
     await database.close()
 
 
-async def admit_deploy_job(config, store: Store, baseline_id: str | None) -> tuple:
+async def admit_deploy_job(
+    config, store: Store, baseline_id: str | None, template_digest: str
+) -> tuple:
     plan = await store.create_plan(
         app="demo",
         environment="staging",
@@ -82,6 +87,7 @@ async def admit_deploy_job(config, store: Store, baseline_id: str | None) -> tup
         baseline_release_id=baseline_id,
         ttl_seconds=900,
         params={},
+        compose_template_digest=template_digest,
     )
     job = await store.admit_job(
         kind="deploy",
@@ -130,12 +136,12 @@ async def baseline_release(store: Store, release_id: str) -> None:
 
 class TestSuccessPath:
     async def test_all_steps_pass_and_release_recorded(self, setup) -> None:
-        config, store = setup
+        config, store, digest = setup
         runtime = FakeRuntime(fail_at=set())
         workflow = DeployWorkflow(
             config=config, store=store, step_executor=runtime
         )
-        _plan, job = await admit_deploy_job(config, store, baseline_id=None)
+        _plan, job = await admit_deploy_job(config, store, baseline_id=None, template_digest=digest)
         status, result, recovery = await workflow.run(job)
         assert status == JobStatus.SUCCEEDED
         assert recovery is None
@@ -153,12 +159,12 @@ class TestSuccessPath:
 
 class TestFailureBeforeRuntimeChange:
     async def test_fails_without_recovery(self, setup) -> None:
-        config, store = setup
+        config, store, digest = setup
         runtime = FakeRuntime(fail_at={"image_build"})
         workflow = DeployWorkflow(
             config=config, store=store, step_executor=runtime
         )
-        _plan, job = await admit_deploy_job(config, store, baseline_id=None)
+        _plan, job = await admit_deploy_job(config, store, baseline_id=None, template_digest=digest)
         status, result, recovery = await workflow.run(job)
         assert status == JobStatus.FAILED
         assert recovery is None
@@ -170,14 +176,14 @@ class TestFailureBeforeRuntimeChange:
 
 class TestFailureAfterRuntimeChange:
     async def test_recovers_previous_release(self, setup) -> None:
-        config, store = setup
+        config, store, digest = setup
         await baseline_release(store, "r-baseline")
         runtime = FakeRuntime(fail_at={"health_check"})
         workflow = DeployWorkflow(
             config=config, store=store, step_executor=runtime
         )
         _plan, job = await admit_deploy_job(
-            config, store, baseline_id="r-baseline"
+            config, store, baseline_id="r-baseline", template_digest=digest
         )
         status, result, recovery = await workflow.run(job)
         assert status == JobStatus.ROLLED_BACK
@@ -190,12 +196,12 @@ class TestFailureAfterRuntimeChange:
         assert "restore_previous" in runtime.calls
 
     async def test_no_baseline_stops_initial_deployment(self, setup) -> None:
-        config, store = setup
+        config, store, digest = setup
         runtime = FakeRuntime(fail_at={"health_check"})
         workflow = DeployWorkflow(
             config=config, store=store, step_executor=runtime
         )
-        _plan, job = await admit_deploy_job(config, store, baseline_id=None)
+        _plan, job = await admit_deploy_job(config, store, baseline_id=None, template_digest=digest)
         status, _result, recovery = await workflow.run(job)
         assert status == JobStatus.FAILED_NO_BASELINE
         assert recovery is not None
@@ -203,14 +209,14 @@ class TestFailureAfterRuntimeChange:
         assert "stop_initial" in runtime.calls
 
     async def test_recovery_failure_blocks_target(self, setup) -> None:
-        config, store = setup
+        config, store, digest = setup
         await baseline_release(store, "r-baseline")
         runtime = FakeRuntime(fail_at={"health_check"}, fail_recover=True)
         workflow = DeployWorkflow(
             config=config, store=store, step_executor=runtime
         )
         _plan, job = await admit_deploy_job(
-            config, store, baseline_id="r-baseline"
+            config, store, baseline_id="r-baseline", template_digest=digest
         )
         status, _result, recovery = await workflow.run(job)
         assert status == JobStatus.ROLLBACK_FAILED
@@ -221,12 +227,12 @@ class TestFailureAfterRuntimeChange:
 
 class TestStepPersistence:
     async def test_steps_recorded_with_details(self, setup) -> None:
-        config, store = setup
+        config, store, digest = setup
         runtime = FakeRuntime(fail_at={"image_import"})
         workflow = DeployWorkflow(
             config=config, store=store, step_executor=runtime
         )
-        _plan, job = await admit_deploy_job(config, store, baseline_id=None)
+        _plan, job = await admit_deploy_job(config, store, baseline_id=None, template_digest=digest)
         await workflow.run(job)
         steps = await store.list_steps(job.job_id)
         by_name = OrderedDict((s.name, s) for s in steps)

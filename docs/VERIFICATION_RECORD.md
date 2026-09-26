@@ -93,3 +93,17 @@
   记入步骤结果
 - 未验收：910B 上正常 Dockerfile 真实构建成功、含 syntax 构建返回结构化
   错误——待首次真实构建时回填
+
+## 2026-09-26 — D3 Compose 模板指纹冻结 + 结构校验 + plan schema v2
+
+- 环境：`Windows 逻辑验证`
+- commit：见本条目对应提交（feat: compose template fingerprint and plan schema v2）
+- 命令：`uv run pytest tests/unit/test_compose_template.py
+  tests/unit/test_schema_migration.py tests/unit/test_gateway_service.py -q`；
+  全量 `uv run pytest -q`
+- 结果：17 项新增聚焦测试通过（digest 注释/键序稳定、语义变化即变、
+  token 0/2 与服务集漂移在加载期拒绝、v1→v2 迁移含 simulation 回填、
+  未知版本拒绝启动）；apply 五条件 STALE_PLAN（模板变化/存量 NULL 指纹）
+  有正反例；全量 314 passed
+- 未验收：910B simulation 全链路重跑、改模板（登记设备挂载）后旧 plan
+  STALE_PLAN → 重新 plan 执行——待切生产操作时回填

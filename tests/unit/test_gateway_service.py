@@ -32,6 +32,9 @@ async def setup(tmp_path: Path):
     config.main.paths.lock_dir = str(tmp_path / "locks")
     config.main.paths.log_dir = str(tmp_path / "logs")
     config.main.concurrency.min_deploy_interval_seconds = 0  # no cooldown noise
+    from tests.conftest import install_compose_template
+
+    install_compose_template(config, tmp_path)
     database_path = tmp_path / "state" / "state.db"
     from drawbridge.state.db import Database
 
@@ -134,6 +137,12 @@ class TestOperationRun:
 
 class TestPlanApply:
     async def _make_plan(self, store: Store, config, **overrides):
+        from drawbridge.config.compose_template import read_compose_template
+
+        env_cfg = config.environment("demo", "staging")
+        digest = read_compose_template(
+            env_cfg.compose_file, list(env_cfg.services)
+        ).digest
         return await store.create_plan(
             app="demo",
             environment="staging",
@@ -145,6 +154,7 @@ class TestPlanApply:
             baseline_release_id=overrides.get("baseline_release_id"),
             ttl_seconds=overrides.get("ttl_seconds", 900),
             params={},
+            compose_template_digest=overrides.get("compose_template_digest", digest),
         )
 
     async def test_apply_unknown_plan(self, setup) -> None:
@@ -186,6 +196,34 @@ class TestPlanApply:
         with pytest.raises(StalePlanError, match="configuration changed"):
             await service.ops_release_apply(
                 plan_id=plan.plan_id, idempotency_key="apply-3-xxxxxxxx"
+            )
+
+    async def test_apply_after_template_change_rejected(self, setup) -> None:
+        """D3 five-condition STALE_PLAN: editing the compose template between
+        plan and apply invalidates the plan even though config_digest is
+        unchanged."""
+        service, store, config = setup
+        plan = await self._make_plan(store, config)
+        env_cfg = config.environment("demo", "staging")
+        template = Path(env_cfg.compose_file)
+        template.write_text(
+            template.read_text(encoding="utf-8").replace(
+                '"18080:8080"', '"18081:8080"'
+            ),
+            encoding="utf-8",
+        )
+        with pytest.raises(StalePlanError, match="compose template changed"):
+            await service.ops_release_apply(
+                plan_id=plan.plan_id, idempotency_key="apply-3b-xxxxxxxx"
+            )
+
+    async def test_apply_legacy_null_digest_plan_rejected(self, setup) -> None:
+        """Pre-D3 plans (NULL template digest) are always STALE_PLAN."""
+        service, store, config = setup
+        plan = await self._make_plan(store, config, compose_template_digest=None)
+        with pytest.raises(StalePlanError, match="compose template changed"):
+            await service.ops_release_apply(
+                plan_id=plan.plan_id, idempotency_key="apply-3c-xxxxxxxx"
             )
 
     async def test_apply_after_baseline_change_rejected(self, setup) -> None:

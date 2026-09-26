@@ -3,13 +3,41 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from drawbridge.config.models import ExecutionProfile, OutputPolicyKind, ToolchainConfig
 from drawbridge.executor.spec import ExecutionSpec, build_environment
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def install_compose_template(config: Any, tmp_path: Path) -> str:
+    """Materialize the repo sample template inside tmp_path, point every
+    environment at it and return its fingerprint (plan D3 test helper).
+
+    Plan/apply paths read and re-validate the admin compose template, so any
+    test that creates plans against the sample config bundle needs a real,
+    structurally valid template file and its digest.
+    """
+    from drawbridge.config.compose_template import read_compose_template
+
+    source = REPO_ROOT / "configs" / "compose" / "demo.staging.yaml"
+    target = tmp_path / "compose" / "demo.staging.yaml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    digest = ""
+    for app in config.apps.values():
+        for env in app.environments.values():
+            info = read_compose_template(target, list(env.services))
+            env.compose_file = str(target)
+            digest = info.digest
+    return digest
 
 
 @pytest.fixture()

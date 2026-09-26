@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from drawbridge.config.compose_template import read_compose_template
 from drawbridge.config.models import DrawbridgeConfig
 from drawbridge.errors import DrawbridgeError, ErrorCode, StalePlanError
 from drawbridge.state.records import (
@@ -171,6 +172,10 @@ class DeployWorkflow:
             raise StalePlanError("plan expired before dispatch")
         if plan.config_digest != self.config.digest:
             raise StalePlanError("configuration changed since planning")
+        env_cfg = self.config.environment(plan.app, plan.environment)
+        template = read_compose_template(env_cfg.compose_file, list(env_cfg.services))
+        if plan.compose_template_digest != template.digest:
+            raise StalePlanError("compose template changed since planning")
         baseline = await self.store.get_current_release(plan.app, plan.environment)
         baseline_id = baseline.release_id if baseline else None
         if plan.baseline_release_id != baseline_id:

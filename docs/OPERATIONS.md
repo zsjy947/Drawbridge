@@ -52,6 +52,14 @@ sudo systemctl restart drawbridge-gateway
 4. 配置摘要（digest）变化后，**旧的 plan 全部失效**（apply 返回
    `STALE_PLAN`），客户端需重新 `ops_release_plan`。
 
+**Compose 模板同权**（plan D3）：模板是四份 YAML 之外的第五个配置权威。
+修改 Compose 模板（如登记设备挂载）后，**已排队的旧 plan 同样失效**
+（`STALE_PLAN`，模板指纹不符）；且模板结构在配置加载、plan、apply、执行前
+四处校验——顶层 `services` 非空、恰好一个 `REPLACE_BY_DRAWBRIDGE` image
+token、服务名集合与 apps.yaml 登记一致，违反即 `CONFIG_INVALID`。模板指纹
+对注释/空白/键序不敏感（规范化 JSON + SHA-256），只对语义变化生效。升级到
+schema v2 前的存量 plan（无指纹）一律 `STALE_PLAN`，需重新 plan→apply。
+
 ## 2. 错误码与处置
 
 | 错误码 | 含义 | 处置 |
@@ -61,7 +69,7 @@ sudo systemctl restart drawbridge-gateway
 | `IDEMPOTENCY_CONFLICT` | 同键不同内容 | 客户端换新幂等键 |
 | `BUSY` / `RATE_LIMITED` | 队列满 / 部署冷却未到 | 按 retry_after 等待 |
 | `QUEUE_TIMEOUT` | 排队超时未执行 | 重新提交（新 plan 若过期） |
-| `STALE_PLAN` | 计划过期/基线变化/配置变化 | 重新 plan |
+| `STALE_PLAN` | 计划过期/基线变化/配置变化/模板指纹变化 | 重新 plan |
 | `DRIFT_DETECTED` | 人工改动与登记基线不一致 | 核实现场后 reconcile |
 | `BUILD_FAILED` | 构建失败 | 看 job 日志（spool 目录） |
 | `BUILD_UNSUPPORTED_FRONTEND` | Dockerfile 含 `# syntax=` 自定义前端指令 | 移除该指令后重新提交（离线目标无法拉取自定义 frontend；不可重试） |

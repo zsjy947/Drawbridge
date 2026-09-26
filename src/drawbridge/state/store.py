@@ -90,6 +90,7 @@ class Store:
         ttl_seconds: float,
         params: dict[str, Any],
         request_id: str | None = None,
+        compose_template_digest: str | None = None,
     ) -> PlanRecord:
         now = time.time()
         record = PlanRecord(
@@ -107,13 +108,16 @@ class Store:
             expires_at=now + ttl_seconds,
             params=params,
             request_id=request_id,
+            compose_template_digest=compose_template_digest,
+            plan_schema_version=2,
         )
         async with self.db.write_lock():
             await self.db.conn.execute(
                 "INSERT INTO plans(plan_id, app, environment, workflow, source_mode,"
-                " git_ref, commit_sha, config_digest, baseline_release_id, status,"
+                " git_ref, commit_sha, config_digest, compose_template_digest,"
+                " plan_schema_version, baseline_release_id, status,"
                 " created_at, expires_at, params_json, request_id)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     record.plan_id,
                     record.app,
@@ -123,6 +127,8 @@ class Store:
                     record.git_ref,
                     record.commit_sha,
                     record.config_digest,
+                    record.compose_template_digest,
+                    record.plan_schema_version,
                     record.baseline_release_id,
                     record.status,
                     record.created_at,
@@ -719,9 +725,10 @@ class Store:
             )
             await self.db.conn.execute(
                 "INSERT INTO releases(release_id, app, environment, plan_id, job_id,"
-                " commit_sha, image_id, image_tag, config_digest, status, rollback_of,"
-                " compose_path, deploy_dir, evidence_json, created_at, verified_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " commit_sha, image_id, image_tag, config_digest, simulated, status,"
+                " rollback_of, compose_path, deploy_dir, evidence_json, created_at,"
+                " verified_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     record.release_id,
                     record.app,
@@ -732,6 +739,7 @@ class Store:
                     record.image_id,
                     record.image_tag,
                     record.config_digest,
+                    1 if record.simulated else 0,
                     record.status,
                     record.rollback_of,
                     record.compose_path,

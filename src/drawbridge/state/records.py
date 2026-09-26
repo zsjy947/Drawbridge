@@ -87,6 +87,11 @@ class PlanRecord:
     expires_at: float
     params: dict[str, Any] = field(default_factory=dict)
     request_id: str | None = None
+    #: Fingerprint of the compose template the plan was validated against
+    #: (schema v2, plan D3).  Legacy rows have NULL — always STALE_PLAN.
+    compose_template_digest: str | None = None
+    #: Plan record shape version; new plans are always 2.
+    plan_schema_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -164,6 +169,9 @@ class ReleaseRecord:
     evidence: dict[str, Any]
     created_at: float
     verified_at: float | None = None
+    #: True when produced by the simulation runtime adapter (schema v2,
+    #: plan D12): never a valid baseline/current release on a compose target.
+    simulated: bool = False
 
 
 @dataclass(frozen=True)
@@ -181,6 +189,7 @@ class ArtifactRecord:
 
 
 def row_to_plan(row: Any) -> PlanRecord:
+    keys = row.keys()
     return PlanRecord(
         plan_id=row["plan_id"],
         app=row["app"],
@@ -196,6 +205,12 @@ def row_to_plan(row: Any) -> PlanRecord:
         expires_at=row["expires_at"],
         params=loads(row["params_json"]) or {},
         request_id=row["request_id"],
+        compose_template_digest=(
+            row["compose_template_digest"] if "compose_template_digest" in keys else None
+        ),
+        plan_schema_version=(
+            row["plan_schema_version"] if "plan_schema_version" in keys else None
+        ),
     )
 
 
@@ -227,6 +242,7 @@ def row_to_job(row: Any) -> JobRecord:
 
 
 def row_to_release(row: Any) -> ReleaseRecord:
+    keys = row.keys()
     return ReleaseRecord(
         release_id=row["release_id"],
         app=row["app"],
@@ -244,6 +260,7 @@ def row_to_release(row: Any) -> ReleaseRecord:
         evidence=loads(row["evidence_json"]) or {},
         created_at=row["created_at"],
         verified_at=row["verified_at"],
+        simulated=bool(row["simulated"]) if "simulated" in keys else False,
     )
 
 

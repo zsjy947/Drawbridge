@@ -13,9 +13,9 @@ import json
 from pathlib import Path
 from typing import Any, TextIO, TypeVar
 
-import yaml
 from pydantic import BaseModel
 
+from drawbridge.config.compose_template import read_compose_template
 from drawbridge.config.models import (
     AppsConfigFile,
     DrawbridgeConfig,
@@ -23,51 +23,14 @@ from drawbridge.config.models import (
     OperationsConfigFile,
     WorkflowsConfigFile,
 )
+from drawbridge.config.yamlstrict import load_yaml_file
 from drawbridge.errors import ConfigInvalidError, DrawbridgeError
-
-
-class _StrictLoader(yaml.SafeLoader):  # type: ignore[misc]  # yaml is untyped
-    """SafeLoader that rejects duplicate mapping keys."""
-
-
-def _no_duplicates_constructor(
-    loader: yaml.Loader, node: yaml.Node, deep: bool = False
-) -> dict[str, Any]:
-    mapping: dict[str, Any] = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        try:
-            duplicate = key in mapping
-        except TypeError:
-            raise yaml.constructor.ConstructorError(
-                None, None, f"unhashable mapping key: {key!r}", key_node.start_mark
-            ) from None
-        if duplicate:
-            raise yaml.constructor.ConstructorError(
-                None, None, f"duplicate mapping key: {key!r}", key_node.start_mark
-            )
-        mapping[key] = loader.construct_object(value_node, deep=deep)
-    return mapping
-
 
 BaseModelT = TypeVar("BaseModelT", bound="BaseModel")
 
 
-_StrictLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicates_constructor
-)
-
-
 def _load_yaml_file(path: Path) -> Any:
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            return yaml.load(fh, Loader=_StrictLoader)  # noqa: S506 - SafeLoader subclass, dup-key guard
-    except FileNotFoundError:
-        raise ConfigInvalidError(f"configuration file not found: {path}") from None
-    except yaml.YAMLError as exc:
-        raise ConfigInvalidError(f"invalid YAML in {path}: {exc}") from None
-    except OSError as exc:
-        raise ConfigInvalidError(f"cannot read {path}: {exc}") from None
+    return load_yaml_file(path)
 
 
 def _parse_model[BaseModelT: BaseModel](
@@ -119,6 +82,7 @@ def load_config_bundle(
         workflows_file.workflows,
         build_profiles=apps_file.build_profiles,
     )
+    _validate_compose_templates(apps_file.apps)
 
     digest_source = json.dumps(
         {
@@ -176,6 +140,25 @@ def _cross_validate(
                     f"workflow {workflow_name!r} step {step.id!r} references public "
                     f"operation {step.operation!r}; workflow steps must be internal"
                 )
+
+
+def _validate_compose_templates(apps: dict[str, Any]) -> None:
+    """Load-time structural validation of every registered compose template.
+
+    On the deployment target (gateway/runner) the template always exists and
+    a corrupt one fails startup — the fail-fast contract of plan D3.  A
+    MISSING file is deliberately deferred to plan/preflight time: development
+    hosts routinely load the repository's sample ``configs/`` bundle whose
+    ``compose_file`` points at the production ``/etc/drawbridge`` path, and
+    ``read_compose_template`` rejects a missing file wherever a plan is
+    created or applied (runner release_plan handler, gateway ops_release_apply,
+    deploy re-validation).
+    """
+    for _app_id, app in apps.items():
+        for _env_name, env in app.environments.items():
+            if not Path(env.compose_file).exists():
+                continue
+            read_compose_template(env.compose_file, list(env.services))
 
 
 def load_config_from_dir(config_dir: str | Path) -> DrawbridgeConfig:

@@ -7,11 +7,11 @@ from pathlib import Path
 import pytest
 
 from drawbridge.config.loader import (
-    _StrictLoader,
     load_apps_config,
     load_config_bundle,
     load_yaml,
 )
+from drawbridge.config.yamlstrict import StrictLoader as _StrictLoader
 from drawbridge.errors import ConfigInvalidError
 
 MAIN_YAML = """

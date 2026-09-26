@@ -14,6 +14,7 @@ import time
 import uuid
 from typing import Any
 
+from drawbridge.config.compose_template import read_compose_template
 from drawbridge.config.models import (
     Access,
     DrawbridgeConfig,
@@ -546,6 +547,12 @@ class GatewayService:
         if plan.config_digest != self.config.digest:
             raise StalePlanError(
                 "configuration changed since the plan was created; re-plan"
+            )
+        env_cfg = self._env_cfg(plan.app, plan.environment)
+        template = read_compose_template(env_cfg.compose_file, list(env_cfg.services))
+        if plan.compose_template_digest != template.digest:
+            raise StalePlanError(
+                "compose template changed since the plan was created; re-plan"
             )
         baseline = await self.store.get_current_release(plan.app, plan.environment)
         baseline_id = baseline.release_id if baseline else None

@@ -1,13 +1,18 @@
-"""SQLite schema (version 1) — MVP spec §8.
+"""SQLite schema (version 2) — MVP spec §8.
 
 Tables: plans, jobs, steps, releases, artifacts, idempotency_keys, events,
 control_state.  The database holds metadata and bounded summaries only;
 full job output lives in the registered log directory.
+
+Version 2 (plan D3+D12): ``plans`` gains ``compose_template_digest`` and
+``plan_schema_version`` (template fingerprint frozen into every new plan);
+``releases`` gains the ``simulated`` flag (cross-runtime baseline identity).
+Existing version-1 databases migrate in place via ``MIGRATIONS_V1_TO_V2``.
 """
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_STATEMENTS = (
     """
@@ -19,20 +24,22 @@ SCHEMA_STATEMENTS = (
     """,
     """
     CREATE TABLE IF NOT EXISTS plans (
-        plan_id             TEXT PRIMARY KEY,
-        app                 TEXT NOT NULL,
-        environment         TEXT NOT NULL,
-        workflow            TEXT NOT NULL,
-        source_mode         TEXT NOT NULL,
-        git_ref             TEXT NOT NULL,
-        commit_sha          TEXT,
-        config_digest       TEXT NOT NULL,
-        baseline_release_id TEXT,
-        status              TEXT NOT NULL,
-        created_at          REAL NOT NULL,
-        expires_at          REAL NOT NULL,
-        params_json         TEXT NOT NULL,
-        request_id          TEXT
+        plan_id                  TEXT PRIMARY KEY,
+        app                      TEXT NOT NULL,
+        environment              TEXT NOT NULL,
+        workflow                 TEXT NOT NULL,
+        source_mode              TEXT NOT NULL,
+        git_ref                  TEXT NOT NULL,
+        commit_sha               TEXT,
+        config_digest            TEXT NOT NULL,
+        compose_template_digest  TEXT,
+        plan_schema_version      INTEGER,
+        baseline_release_id      TEXT,
+        status                   TEXT NOT NULL,
+        created_at               REAL NOT NULL,
+        expires_at               REAL NOT NULL,
+        params_json              TEXT NOT NULL,
+        request_id               TEXT
     )
     """,
     """
@@ -100,6 +107,7 @@ SCHEMA_STATEMENTS = (
         image_id        TEXT,
         image_tag       TEXT,
         config_digest   TEXT NOT NULL,
+        simulated       INTEGER NOT NULL DEFAULT 0,
         status          TEXT NOT NULL,
         rollback_of     TEXT,
         compose_path    TEXT,
@@ -166,4 +174,15 @@ SCHEMA_STATEMENTS = (
     """
     CREATE INDEX IF NOT EXISTS idx_events_target ON events(app, environment, ts)
     """,
+)
+
+#: In-place upgrade of an existing version-1 database (single transaction).
+#: The releases backfill flags pre-D12 simulation releases via their evidence
+#: marker so cross-runtime baseline filtering (D12) sees them correctly.
+MIGRATIONS_V1_TO_V2 = (
+    "ALTER TABLE plans ADD COLUMN compose_template_digest TEXT",
+    "ALTER TABLE plans ADD COLUMN plan_schema_version INTEGER",
+    "ALTER TABLE releases ADD COLUMN simulated INTEGER NOT NULL DEFAULT 0",
+    "UPDATE releases SET simulated = 1"
+    " WHERE evidence_json LIKE '%\"validation_level\":\"simulation\"%'",
 )

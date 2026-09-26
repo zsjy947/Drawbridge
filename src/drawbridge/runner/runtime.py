@@ -27,6 +27,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from drawbridge.config.compose_template import (
+    COMPOSE_IMAGE_TOKEN as _COMPOSE_IMAGE_TOKEN,
+)
 from drawbridge.config.models import (
     DrawbridgeConfig,
     EnvironmentConfig,
@@ -55,7 +58,9 @@ _RUNTIME_LINUX = sys.platform == "linux"
 
 #: Placeholder token in the admin compose template replaced by the frozen
 #: immutable image ID of the release (apps.yaml documents this contract).
-COMPOSE_IMAGE_TOKEN = "REPLACE_BY_DRAWBRIDGE"  # noqa: S105 - template marker, not a secret
+#: Canonical definition lives in :mod:`drawbridge.config.compose_template`
+#: (D3); re-exported here for the rendering path and existing imports.
+COMPOSE_IMAGE_TOKEN = _COMPOSE_IMAGE_TOKEN
 
 _EMPTY_ENV_FILE = "/etc/drawbridge/compose/empty.env"
 #: Default bounded preview size for spooled change steps.
