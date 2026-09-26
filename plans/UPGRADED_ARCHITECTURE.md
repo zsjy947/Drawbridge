@@ -286,3 +286,26 @@
   实机验收条目（双账号 state.db、真实 BuildKit 构建、compose 生产部署、
   `/dev/davinci2` 挂载、模式切换、回滚/中断恢复）按 VERIFICATION_RECORD
   的未验收清单在切生产时逐项执行并回填——切生产前置代码条件已全部就位。
+
+
+---
+
+## 6. 计划 D 非目标与延迟决策（明确不做，2026-09-26 裁决）
+
+以下为切生产审查中评估后**明确不做**的项（继承自原 C 计划并经全量生产复审
+确认），登记于此防止后续会话重复立项或误以为遗漏：
+
+1. **runtime_profiles 全套**：与"Compose 模板即权威"重复表达、引入第二
+   信任锚；本仓模板由管理员维护且业务提交不可触达，攻击面更小；
+2. **operator 文件物化 / `.env` 插值**：empty.env 无插值架构经 ref 自证的
+   插值泄漏风险反证更优；模板 `env_file:` 指令已覆盖管理员密钥路径需求；
+3. **动态注册（ops_app_register）**：违反"注册表权威来源为 YAML"不变量
+   （AGENTS 3）；
+4. **ops_http_request / workspace_patch**：维持显式非目标（健康检查已覆盖
+   部署内验证；远程源码编辑不属于首版）；
+5. **预构建镜像模式（原 C8）：暂不立项**——image token 渲染 +
+   `up --no-build --pull never` 已保证部署镜像本地钉住；该模式改变镜像来源
+   信任模型（plan 需冻结镜像 digest 与审批来源），设计与测试面大；910B 当前
+   路径是先走通 rootless BuildKit 真实构建，内网构建可行则预载需求不复存在。
+   若未来确需离线预载，再基于 ref approved_digests + `image inspect` 钉住
+   方案立项（作为优化计划 E 候选）。

@@ -192,6 +192,20 @@ sqlite3 -json /var/lib/drawbridge/state.db \
 - state.db 使用 SQLite backup API 生成一致快照（不要只复制 db 文件而遗漏
   WAL）；schema 版本不匹配时拒绝启动，先完成迁移与备份。
 
+**存量数据与升级语义汇总**（切生产审查各项变更对已有部署的影响）：
+
+| 变更 | 存量影响 | 处置 |
+|---|---|---|
+| state.db schema v1→v2（plans 增模板指纹列、releases 增 simulated 列） | 启动时单事务自动迁移；sim release 由 evidence 标记回填 | 备份快照后正常启动 |
+| 存量 plan（NULL 模板指纹） | 恒 `STALE_PLAN`（apply/执行均拒） | 重新 plan→apply（DEPLOYMENT §11 第 3 步） |
+| 新错误码 `BUILD_UNSUPPORTED_FRONTEND` / `REPO_CONFIG_REJECTED` | 无数据影响 | 客户端按 retryable=false 处理 |
+| 诊断通道 BUSY（max_read_requests 落地） | 无 schema 变化 | 客户端按 retryable 处理 |
+| releases.simulated 过滤（模式切换语义） | sim release 不再作为 compose 目标的基线/current；`ops_status`/`ops_history` 展示随之变化 | 切换后首次部署走无基线语义（§8） |
+| compose `--env-file` 按 `paths.config_dir` 解析 | `/etc/drawbridge` 标准部署路径不变 | 非标准布局确认 `config_dir/compose/empty.env` 在位 |
+| `build_output_dir` 必填 | 存量 apps.yaml 缺该项时启动 `CONFIG_INVALID` | 补填 + 创建交接目录（DEPLOYMENT §2） |
+| retention 扩展 job 工作目录回收 | 历史遗留 `deploy_root/jobs/` 目录不追溯清理 | 首次升级后一次性人工清理（§5.3） |
+| job 级日志预算（job_log_hard_limit_bytes 等） | 预留未生效（声明降级） | 无操作（UPGRADED_ARCHITECTURE §4） |
+
 ## 8. 运行时模式切换（simulation → compose）
 
 `runtime` 是 apps.yaml 的管理员字段：改 YAML + 重启 Gateway/Runner 即完成

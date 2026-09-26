@@ -190,3 +190,51 @@ HTTP 为明文；token 只防同网段误触，不防窃听。跨网段访问先
 自动恢复 → 首次部署失败（无基线）→ 镜像缺失恢复失败 → 手工漂移检测拒绝。
 参数层用非法输入回归：`;`、换行、`$(...)`、`-c`、URL、revision 表达式、
 未登记 ref/service/file、额外字段、数字字符串、超长输入必须全部拒绝。
+
+## 11. 910B 切生产操作清单（simulation → compose）
+
+前置：切生产相关代码交付已全部合入（各项能力的实现核查见
+[plans/UPGRADED_ARCHITECTURE.md](../plans/UPGRADED_ARCHITECTURE.md) §2.11–§2.15）。
+每一步的实机验收证据按固定节格式追加进
+[VERIFICATION_RECORD.md](VERIFICATION_RECORD.md)——未回填即视为未完成。
+
+1. **代码与配置同步**：Windows 侧提交推送 → 服务器 `git pull`（既有同步
+   路径）→ `uv sync --frozen` → `uv run scripts/verify.py` 三绿；
+2. **权限验证**：state.db/WAL 由组可写；若沿用 nohup 前台运行维持现状，
+   切 systemd 时按 `deploy/*.service`（含 UMask=0007）+ 本手册 §2 账号规划
+   执行（含 `build_output_dir` 交接目录与 docker 组验证）；
+3. **存量 plan 处置**：schema v2 上线后存量 plan（NULL 模板指纹）一律
+   `STALE_PLAN`——选择无排队 job 的窗口重启 gateway/runner，客户端重新
+   `ops_release_plan`→`ops_release_apply`；
+4. **simulation 回归**：`drawbridge-simulate --config-dir ~/drawbridge-run/etc`
+   退出码 0 且 `"ok": true`；
+5. **参数回调**：`min_deploy_interval_seconds` 0→60；`allowed_cidrs` 收紧到
+   实际客户端网段；`diagnostics.root` 按生产布局调整（指向已存在目录）；
+   `runtime: simulation`→`compose`；`buildkit_socket` 指向 rootless
+   buildkitd；`build_output_dir` 补填（必填项）；以启动日志 `config_digest`
+   确认加载；
+6. **基础设施**：安装 Docker Engine + Compose v2 + 独立 rootless buildkitd
+   （禁 `security.insecure`/`network.host` entitlement、不启用
+   no-process-sandbox，见 [PROFILES.md](PROFILES.md) §2）；预置冻结测试镜像
+   并回填 `test_runner.image_id`；核对 `paths.config_dir/compose/empty.env`
+   存在（selfcheck 已查）；确认 `drawbridge-runner` 已获 docker socket 组
+   访问（`sudo -u drawbridge-runner docker version`）；
+7. **模板与设备**：Compose 模板登记 `/dev/davinci2` 设备与驱动挂载（不用
+   privileged；卡 2 为实机确认的空闲卡，卡 0/1/3/4/5/6/7 为现有负载不动）；
+   `npu.enabled: true` 按实机登记 executable/argv（`npu-smi` + `["info"]`），
+   并同步 runner unit 的 DeviceAllow（见
+   [OPERATIONS.md](OPERATIONS.md) §9）；改模板会使已排队 plan 返回
+   `STALE_PLAN`，属预期；
+8. **真实构建验收**：首例 `image_build`（syntax 防护与产物交接在位）→
+   import/identify → compose up → 健康门禁 → 测试容器 → finalize 漂移核对
+   全链路成功，逐条记入 VERIFICATION_RECORD；核对 `compose ps --format json`
+   的 `Image` 字段对 `sha256:` 引用原样返回——若被 compose 规范化，先修
+   `parse_compose_ps_images` 再继续；
+9. **故障路径验收**：健康失败自动恢复（rolled_back）、测试失败自动恢复、
+   首次部署失败（failed_no_baseline）、显式回滚、kill Runner 中断后
+   needs_attention 与人工 reconcile——逐条留痕；切模式场景必须验证 simulation
+   时代 release 不作为 compose 目标的基线/current（首部署失败走
+   `failed_no_baseline` 而非 `rollback_failed`，见 OPERATIONS §8）；构建失败
+   排障演练确认失败 `details` 可远程读取；
+10. **收尾**：`npu_status` 只读观测正常；`ops_history` 三视图与生产数据一致；
+    审计事件导出抽查；本手册 §10 验收清单参数层回归（非法输入全拒）。

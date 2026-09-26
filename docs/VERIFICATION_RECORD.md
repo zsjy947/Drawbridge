@@ -333,3 +333,19 @@
   事件（与写路径不对称的设计取舍）；_step_budget 使用总预算而非剩余
   （外层 deadline 已界定位真上界）；v2 迁移 evidence LIKE 回填为有限
   启发式（仅存量行、影响面为标记而非安全属性）
+
+
+## 2026-09-27 — 计划 D 文档归档（原文删除）
+
+- 环境：`Windows 逻辑验证`
+- 内容：本地规划文档 `plans/OPTIMIZATION_D_PRODUCTION_CUTOFF_AND_REVIEW_
+  FIXES.md`（从未入 git）的全部有留存价值内容已沉淀至受追踪文档并核对了
+  交叉引用：
+  * 任务实现结论 → UPGRADED_ARCHITECTURE §1 总览表 / §2.11–§2.15 / §4
+    偏差登记（前次完成）；
+  * §3 非目标与 C8 预构建镜像裁决 → UPGRADED_ARCHITECTURE §6（本次新增）；
+  * §5 910B 切生产操作清单 → DEPLOYMENT §11（本次新增，引用改为持久文档）；
+  * §6 存量数据与升级语义 → OPERATIONS §7 汇总表（本次新增）；
+  * 逐任务验收留痕 → 本文档（D0–D16 + 审查条目均已在档）。
+- 处置：按计划 §7.3 约定删除原文（工作区不再保留）；`.git/info/exclude`
+  条目同步移除；仓库内无任何指向原文的引用（grep 复核为空）
