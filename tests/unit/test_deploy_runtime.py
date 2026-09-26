@@ -392,3 +392,40 @@ def _minimal_state() -> Any:
         total_budget=100.0,
         recovery_budget=10.0,
     )
+
+
+class TestImportTimeout:
+    async def test_image_import_uses_configured_timeout(self, tmp_path: Path) -> None:
+        """Plan D15: docker load runs under the build profile's configurable
+        import timeout (was a fixed 120s)."""
+        config = _portable_config(tmp_path)
+        config.build_profiles["demo"].import_timeout_seconds = 1700
+        seen: dict[str, object] = {}
+
+        class TimeoutCapturingPM(_RecordingProcessManager):
+            async def execute(self, spec: Any) -> Any:
+                seen["timeout"] = spec.timeout_seconds
+                seen["argv"] = tuple(spec.argv)
+                return await super().execute(spec)
+
+        state = _minimal_state()
+        job_dir = tmp_path / "deploy" / "jobs" / state.job.job_id
+        job_dir.mkdir(parents=True)
+        (job_dir / "image.tar").write_bytes(b"tar")
+        database = Database(tmp_path / "state" / "state.db")
+        await database.connect()
+        await database.initialize()
+        store = Store(database)
+        runtime = DeployRuntime(
+            config=config,
+            store=store,
+            process_manager=TimeoutCapturingPM(accepted=True),  # type: ignore[arg-type]
+            log_dir=str(tmp_path / "logs"),
+        )
+        try:
+            result = await runtime.step_image_import(state, {})
+            assert result["loaded"] is True
+            assert seen["timeout"] == 1700.0
+            assert "image.tar" in "/".join(seen["argv"])  # type: ignore[arg-type]
+        finally:
+            await database.close()

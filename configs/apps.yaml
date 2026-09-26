@@ -77,3 +77,4 @@ build_profiles:
     platform: linux/arm64               # 910B server is aarch64
     timeout_seconds: 900
     max_parallel: 1
+    import_timeout_seconds: 300         # docker load budget (GB-scale tars)

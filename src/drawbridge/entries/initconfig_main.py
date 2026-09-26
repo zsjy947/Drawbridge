@@ -176,6 +176,7 @@ build_profiles:
     platform: linux/arm64
     timeout_seconds: 900
     max_parallel: 1
+    import_timeout_seconds: 300
 """
 
 _COMPOSE_TEMPLATE = """\

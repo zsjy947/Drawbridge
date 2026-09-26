@@ -145,6 +145,7 @@ Runner 按 `drawbridge.yaml` 的 `retention.cleanup_interval_seconds`（默认
 | 诊断 job 记录 | `diagnostics.retention_seconds`（默认 24h） | 含其 steps |
 | 其他终态 job 记录 | `retention.job_record_days`（默认 7 天） | **被 release 行引用的永不清理**；`rollback_failed`/`needs_attention` 永不清理（目标阻断语义优先） |
 | job spool 日志目录 | 随对应 job 记录删除 | `log_dir/<job_id>/` |
+| job 工作目录 | 随对应 job 记录删除 | `deploy_root/jobs/<job_id>/`（source.tar + 解包源码 + image.tar；image.tar 在 `docker load` 后即冗余——回滚走 Engine 镜像）。阻断状态 job 不在删除清单，现场证据自动保留（plan D15） |
 
 **永不自动清理**：releases 与 artifacts 行（审计与回滚链）、events（只追加）、
 当前/上一成功/回滚引用的制品。镜像实体的回收仍属目标机人工操作——本任务不
@@ -165,7 +166,10 @@ queued_at、events 按 ts 递减）。releases 视图带 `is_current` /
   preflight 也会在低于保留空间时拒绝构建；
 - `retention.successful_releases`（默认 5）是**人工清理的对照参数**：代码
   不自动执行——按该数量保留历史成功 release 的制品，超出部分由管理员按
-  目标机 Docker 流程人工回收。
+  目标机 Docker 流程人工回收；
+- **历史遗留**：`deploy_root/jobs/` 工作目录回收随 D15 启用，之前部署
+  遗留的目录不追溯——首次升级后按 `ls deploy_root/<env>/jobs/` 与
+  `jobs` 表核对，一次性人工清理不在保留清单内的旧目录。
 
 ## 6. 审计
 

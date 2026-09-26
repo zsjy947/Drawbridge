@@ -642,11 +642,12 @@ class DeployRuntime:
                 "image_import ran before image_build produced an archive",
                 code=ErrorCode.INTERNAL,
             )
+        profile = self.config.build_profile(self._env_cfg(state).build_profile)
         result = await self._docker(
             "image_import",
             ["image", "load", "--input", str(archive)],
             state,
-            timeout=120.0,
+            timeout=float(profile.import_timeout_seconds),
             max_bytes=1024 * 1024,
         )
         if not result.accepted:

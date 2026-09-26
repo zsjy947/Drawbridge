@@ -328,3 +328,60 @@ async def test_runner_tick_triggers_retention_on_schedule(env) -> None:
         row = await cursor.fetchone()
     assert row["n"] == 1
     await runner.stop()
+
+
+async def test_retention_removes_job_work_dirs(env) -> None:
+    """Plan D15: retired jobs' deploy_root/jobs/<id>/ directories go with
+    the record; blocking-status scenes and non-job content stay."""
+    config, store, _, tmp_path = env
+    deploy_root = tmp_path / "deploy"
+    config.environment("demo", "staging").deploy_root = str(deploy_root)
+    jobs_root = deploy_root / "jobs"
+    jobs_root.mkdir(parents=True)
+
+    retired = await seed_job(
+        store, kind="restart", status="failed", finished=OLD, key="workdir-old-1"
+    )
+    blocking = await seed_job(
+        store, kind="deploy", status="needs_attention", finished=OLD, key="workdir-blk-1"
+    )
+    for job_id in (retired, blocking):
+        (jobs_root / job_id / "source").mkdir(parents=True)
+        (jobs_root / job_id / "source.tar").write_bytes(b"tar")
+        (jobs_root / job_id / "image.tar").write_bytes(b"tar")
+    # non-job content under deploy_root must never be touched
+    (deploy_root / "compose.rendered.yaml").write_text("x", encoding="utf-8")
+    (deploy_root / "simulation.log").write_text("x", encoding="utf-8")
+
+    counts = await run_retention(config, store)
+    assert counts["jobs"] >= 1
+    assert counts["job_work_dirs"] >= 1
+    assert not (jobs_root / retired).exists()
+    assert (jobs_root / blocking).exists()  # incident scene preserved
+    assert (deploy_root / "compose.rendered.yaml").exists()
+    assert (deploy_root / "simulation.log").exists()
+
+
+def test_import_timeout_configurable() -> None:
+    """Plan D15: BuildProfileConfig.import_timeout_seconds bounds docker load."""
+    from drawbridge.config.models import BuildProfileConfig
+
+    profile = BuildProfileConfig.model_validate(
+        {"platform": "linux/arm64", "import_timeout_seconds": 1800}
+    )
+    assert profile.import_timeout_seconds == 1800
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        BuildProfileConfig.model_validate(
+            {"platform": "linux/arm64", "import_timeout_seconds": 0}
+        )
+    with pytest.raises(pydantic.ValidationError):
+        BuildProfileConfig.model_validate(
+            {"platform": "linux/arm64", "import_timeout_seconds": 3600}
+        )
+    # default replaces the old fixed 120s
+    assert (
+        BuildProfileConfig.model_validate({"platform": "linux/arm64"}).import_timeout_seconds
+        == 300
+    )

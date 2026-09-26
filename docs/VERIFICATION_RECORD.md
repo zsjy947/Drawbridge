@@ -239,3 +239,17 @@
   apps.yaml 的 diagnostics.root 默认改为 {root}/repos/demo（不再指向永不
   创建的 deploy_root/current）
 - 未验收：910B 切生产排障演练（失败 details 远程可读）——待切生产操作回填
+
+
+## 2026-09-26 — D15 job 工作目录回收与镜像导入超时
+
+- 环境：`Windows 逻辑验证`
+- commit：见本条目对应提交（feat: reclaim job work directories, configurable import timeout）
+- 命令：`uv run pytest tests/unit/test_retention_and_history.py
+  tests/unit/test_deploy_runtime.py -q`；全量 `uv run pytest -q`
+- 结果：349 passed——retention 清单联动删除 `deploy_root/jobs/<id>/`
+  （source.tar/解包源码/image.tar），阻断 job 工作目录保留，
+  compose.rendered.yaml/simulation.log 不触碰；import_timeout_seconds
+  模型校验（1–1800，默认 300 取代固定 120）与实际 spec.timeout_seconds
+  断言（1700 生效、argv 指向 image.tar）
+- 未验收：910B 连续多次部署后确认 jobs/ 仅存未回收项——待切生产操作回填

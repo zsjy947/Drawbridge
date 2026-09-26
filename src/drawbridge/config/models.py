@@ -582,11 +582,19 @@ class EnvironmentConfig(StrictModel):
 
 
 class BuildProfileConfig(StrictModel):
+    """Build profile knobs (apps.yaml build_profiles).
+
+    ``import_timeout_seconds`` bounds ``docker load`` (plan D15): GB-scale
+    model image tars can exceed the historical fixed 120s and must fail
+    cleanly rather than mid-import.
+    """
+
     context: str = Field(default=".", pattern=r"\.|[A-Za-z0-9_][A-Za-z0-9_.-]*")
     dockerfile_basename: str = Field(default="Dockerfile", pattern=r"[A-Za-z0-9_.-]{1,128}")
     platform: str = Field(pattern=r"linux/[a-z0-9_/]+")
     timeout_seconds: int = Field(default=900, ge=1, le=3600)
     max_parallel: int = Field(default=1, ge=1, le=4)
+    import_timeout_seconds: int = Field(default=300, ge=1, le=1800)
 
 
 class AppConfig(StrictModel):
