@@ -9,11 +9,12 @@
 > 与设计声明逐项比对；并实测质量门：`uv run pytest -q`（284 passed / 4 skipped）、
 > `uv run ruff check src tests`（零告警）、`uv run mypy`（strict 零告警）。
 >
-> **代码基线**：`main @ 922b22c`。
+> **代码基线**：`main @ 922b22c`（A/B 时代）→ 计划 D 实施后见 §5。
 > **来源文档**：本仓与 drawbridge_ref 的两轮对比（结论已吸收进本文，对比文档为
-> 本地工作文档，不进 git）；优化计划 A/B（已实施，原文已删除、内容吸收于本文）。
->
-> **未完成事项**不在此展开，统一移交 [OPTIMIZATION_D_PRODUCTION_CUTOFF_AND_REVIEW_FIXES.md](OPTIMIZATION_D_PRODUCTION_CUTOFF_AND_REVIEW_FIXES.md)。
+> 本地工作文档，不进 git）；优化计划 A/B（已实施，原文已删除、内容吸收于本文）；
+> 优化计划 D「910B 切生产就绪与审查修复」（D0–D16 已全部实施，2026-09-26，
+> 原文为本地规划文档不入库，实施结论吸收于本文 §2.11–§2.15 与
+> [docs/VERIFICATION_RECORD.md](../docs/VERIFICATION_RECORD.md) 的逐任务验收留痕）。
 
 ---
 
@@ -31,6 +32,14 @@
 | 8 | MCP SDK TransportSecuritySettings 镜像边缘白名单（421 修复） | 910B 实机调试（原 DEBUG.md P4） | `6d01d97` | 修复 TECHNICAL_DESIGN §8"内网直连"承诺在 SDK 层被 421 拦截的实现缺口 | ✅ 已实现 |
 | 9 | 配置模型接受 Windows 盘符路径（仅开发/模拟） | 对比轮 1 §9 | 随 simulation 落地 | 对 TECHNICAL_DESIGN §6"绝对路径"的开发机让步，生产仍 POSIX | ✅ 已实现 |
 | 10 | `ops_catalog` 暴露各环境 `runtimes` 类型 | 优化计划 A §4 | `8f221b7` | 客户端可据此判断证据等级 | ✅ 已实现 |
+| 11 | 一键质量门 + 追加式验收证据链（`scripts/verify.py` + VERIFICATION_RECORD） | 计划 D D0 | `96a894f` | 原设计无等价物；防"声称与实际不符" | ✅ 已实现 |
+| 12 | Compose 模板结构校验 + 指纹冻结 + plan schema v2（STALE_PLAN 五条件） | 计划 D D3 | `b3b5a60` | 把模板纳入 plan 复核权威（原设计模板不参与任何校验） | ✅ 已实现 |
+| 13 | 部署/回滚成功路径原子完成（`complete_job_with_release` 单事务） | 计划 D D4 | `45c9a32` | 强化 TECHNICAL_DESIGN §7 的崩溃窗口语义（消除人工 reconcile 面） | ✅ 已实现 |
+| 14 | 受控输入防线补强：Dockerfile `# syntax=` 拒绝、git 本地 config 危险键扫描、`gc.auto=0` | 计划 D D2/D5 | `9c189a7` `b1f4709` | 落实 MVP §3 受控构建/Git 前缀契约的代码强制 | ✅ 已实现 |
+| 15 | 跨运行时基线身份（releases.simulated + current/基线按 runtime 过滤 + 恢复前镜像探针） | 计划 D D12（含 D3 迁移列） | `e93e6ef` | 补原设计未覆盖的模式切换语义 | ✅ 已实现 |
+| 16 | BuildKit 产物交接目录 + buildctl du 可达性探测（`build_output_dir` 必填） | 计划 D D16 | `1ad45d4` | 落实 PROFILES §2 交接模型的代码实现 | ✅ 已实现 |
+| 17 | 诊断准入上限（max_read_requests）+ 分页收口（releases 游标 / project_list 参数面） | 计划 D D7/D8 | `442bf79` `bd737bc` | 修正 MVP §7/§4 声明的实现缺口 | ✅ 已实现 |
+| 18 | 运维可用性批：selfcheck 角色、empty.env 交付与 config_dir 解析、失败证据 details、诊断根修复、工作目录回收、SIGTERM 优雅停机、清理批 | 计划 D D1/D6/D9/D10/D11/D13/D14/D15 | `c229a79`–`0a9bfd7` | 原设计假设面之内的缺口补齐 | ✅ 已实现 |
 
 ---
 
@@ -126,6 +135,93 @@
 - **实现**：`gateway/service.py:266-280`——apps 段每个 environment 返回 `runtimes`
   （compose|simulation），客户端可据此判断证据等级。
 
+### 2.11 计划 D：切生产前置防线（D0–D5、D13、D16）✅
+
+- **D0 证据链**：`scripts/verify.py`（ruff/mypy/pytest 顺序执行、输出与
+  report.json 落盘 `var/verification/<UTC 时间戳>/`）+
+  `docs/VERIFICATION_RECORD.md`（追加式、固定节格式、显式记录未验收项）；
+  AGENTS.md 质量门补一键命令。
+- **D1 systemd 权限**：两 unit `UMask=0007`（双账号共享 state.db 组可写）、
+  runner `SupplementaryGroups=docker`、NPU DeviceAllow 注释模板；
+  DEPLOYMENT §2 / OPERATIONS §8 同步。
+- **D2 构建前端防护**：`scan_dockerfile_directives` 纯文本扫描，`# syntax=`
+  → `BUILD_UNSUPPORTED_FRONTEND`（任何 buildctl 调用之前拒绝）；escape/check
+  放行并记入步骤结果。
+- **D3 模板指纹**：`config/compose_template.py`（严格 YAML/非空 services/
+  恰好一个 image token/服务集与登记一致/规范化 JSON SHA-256 指纹）；加载期
+  校验（文件存在即校验，缺失在 plan/apply 拒绝——开发机加载样例 bundle 的
+  /etc 路径不受影响）；STALE_PLAN 五条件（gateway 与 runner 两处同步）；
+  SCHEMA_VERSION 1→2 单事务迁移（plans +2 列、releases +simulated 列 +
+  evidence 回填），存量 NULL 指纹 plan 恒 STALE_PLAN。
+- **D4 原子完成**：`Store.complete_job_with_release` 单 BEGIN IMMEDIATE 写
+  releases/artifacts/release_recorded/job 终态/job_finished；DeployWorkflow
+  交付 `StagedRelease`（成功路径不再先写 release）；`release_rollback` 经
+  `JobContext.staged_releases` 同样原子化；失败/恢复路径与
+  `reconcile_stale_running` 分工不变。
+- **D5 git 防线**：`GitClient` 远程接触前纯文本扫描 `<repo>/.git/config`
+  （include/includeIf、insteadOf/pushInsteadOf、core.sshCommand/hooksPath、
+  credential.*、http(s).proxy、extraheader、submodule.*.update →
+  `REPO_CONFIG_REJECTED`；二进制/超 1 MiB 拒绝）；每次 git argv 追加
+  `-c gc.auto=0`（同步进 git_safe 预设）。
+- **D13 compose 插值钉死文件**：`compose_env_file(config_dir)` 唯一来源
+  （三处字面量归一）；`configs/compose/empty.env` 随仓交付、init-config 生成；
+  生产 preflight 缺失即 `CONFIG_INVALID`（变更前干净失败），simulation
+  preflight 覆写为磁盘/基线检查；selfcheck runner 视角缺失 FAIL；
+  check_project_config.sh 同源解析；gitconfig/ssh-wrapper 交付步骤与 WARN。
+- **D16 BuildKit 交接**：`build_output_dir` 必填（缺失 CONFIG_INVALID）；
+  buildctl `dest=<交接目录>/<job_id>.tar` → Runner 校验存在/非空 → 复制到
+  `jobs/<id>/image.tar` → 大小 + 流式 SHA-256（记入步骤结果与 release
+  evidence）→ 清理交接副本 → docker load；selfcheck runner 角色以
+  `buildctl --addr <socket> du` 真实探测（失败 FAIL）。
+
+### 2.12 计划 D：运行时模式切换基线语义（D12）✅
+
+- **写入点**：`deploy._finalize` 与 `run_release_rollback` 依
+  `environments.<env>.runtime` 写 `releases.simulated`（schema v2 列）。
+- **读取点**：`get_current_release(exclude_simulated=)`——plan 创建、apply
+  复核、执行前复核、ops_status、ops_history（is_current/rollback_eligible/
+  simulated 标注）、ops_test、回滚 current 判定全部按
+  `excludes_simulated_releases(runtime)` 过滤；simulation 目标视图不变。
+- **入口**：compose 目标上显式回滚 sim release → `INVALID_PARAMETER`（异源
+  说明）。
+- **快失败**：`step_restore_previous` / `restore_to_release` 在 compose up 前
+  `docker image inspect` 基线镜像；缺失（simulated 或人工清理）→ 结构化
+  `ROLLBACK_FAILED` 指向人工 reconcile。切换后首次部署自动回到无基线语义
+  （失败 → stop_initial → FAILED_NO_BASELINE）。
+- **OPERATIONS §8** 新增模式切换章节。
+
+### 2.13 计划 D：准入与可见性（D7/D8）✅
+
+- **D7**：`concurrency.max_read_requests` 落地为诊断通道准入上限（库内
+  queued+running 计数、终态自动回收、跨重启保持；饱和 → BUSY 不建 job）；
+  `_check_capacity` 过滤 diagnostic（积压不再挤占变更容量）。
+- **D8**：`list_releases(before_created_at=)` + releases 游标（复用界检解析）；
+  `project_list` 登记 `cursor`（opaque_cursor，默认 "0"=首页）/`limit`
+  （1–200，默认 100），handler 严格拒绝非数字 cursor（不再静默回首页）。
+
+### 2.14 计划 D：失败证据与运维体验（D14/D6/D11）✅
+
+- **D14**：七个变更步骤失败点附加 `_failure_evidence`（终止原因/退出码/
+  预算内完整 head+tail stderr 环/字节数/log_ref）进 `DrawbridgeError.details`，
+  随步骤 detail_json 与 job result `error.details` 客户端可读；原始日志仍
+  不上 MCP。诊断根默认改为 `{root}/repos/demo`（原 `deploy_root/current`
+  永不创建），缺失根返回结构化 `NO_BASELINE` 指引。
+- **D6**：selfcheck `--role {gateway,runner,simulation,all}`（buildless 角色
+  SKIP 容器检查）；Python ≥3.12 硬门槛。
+- **D11**（11 项）：assert→显式检查、注释 401→403、死校验器移除、Host 剥
+  端口括号感知（IPv6）、plan baseline 口径归一（Runner 侧为准）、token/
+  successful_releases 文档化、**unraisable 消除**（根因为 ProcessManager
+  子进程 transport 未确定性 close，finally 显式 close 后全量 0 警告）、
+  queue_expired 两路径补 `job_queue_expired` 审计、runner SIGTERM 优雅停机
+  （取消在飞任务 → needs_attention + 审计，退出 0）、validators 预留注记。
+
+### 2.15 计划 D：磁盘与超时（D15）✅
+
+- retention 联动删除 `deploy_root/jobs/<job_id>/`（source.tar/解包源码/
+  image.tar；只按删除清单，阻断现场自动保留；历史遗留一次性人工清理已写入
+  OPERATIONS §5.3）；`BuildProfileConfig.import_timeout_seconds`
+  （1–1800，默认 300）取代固定 120s 的 docker load 预算。
+
 ---
 
 ## 3. 优化计划 A/B 验收标准复核汇总
@@ -146,27 +242,45 @@
 
 ---
 
-## 4. 核查中发现的偏差与缺陷（移交 OPTIMIZATION_D）
+## 4. 核查中发现的偏差与缺陷（计划 D 处置结果）
 
-以下不属于 A/B 交付承诺本身的失败，而是核查过程中发现的"规格声明/文档承诺与实现"
-之间的缺口，全部登记进 [OPTIMIZATION_D_PRODUCTION_CUTOFF_AND_REVIEW_FIXES.md](OPTIMIZATION_D_PRODUCTION_CUTOFF_AND_REVIEW_FIXES.md)：
+以下为核查发现的"规格声明/文档承诺与实现"缺口及其在计划 D（2026-09-26 实施）中的
+处置结果：
 
-1. `ops_history` releases 游标不可用（A 遗留，→ D8）；
-2. `project_list` 参数与 MVP §4 声明不一致：规格登记 `subdir、limit、cursor、可选 release_id`，
-   实现只登记 `subdir`，handler 返回的 `next_cursor` 因此无法被客户端使用（→ D8）；
-3. `config_read` 的"可选 release_id"（MVP §4）未实现，诊断固定当前诊断根（→ D8 一并裁决：
-   实现或在文档层明确降级为非目标）；
-4. 其余小项（401/403 注释、store 内 assert、死校验器等）→ D11 清理批；
-5. AGENTS.md"已知边界"两条（`step_stop_initial` 归属核对缺失、紧急维护标志跨重启被配置
-   覆盖且 OPERATIONS.md 紧急路径与该行为矛盾）在本次核查中确认仍然成立 → D10/D3 关联处理。
+1. `ops_history` releases 游标不可用（A 遗留）→ **已修复**（D8，`bd737bc`）；
+2. `project_list` 参数与 MVP §4 不一致 → **已对齐**（D8：cursor/limit 登记，
+   非法 cursor 严格拒绝）；
+3. `config_read` 的"可选 release_id"（MVP §4）→ **裁决为显式降级**（D8）：
+   实现固定诊断根（910B 实机已验证该形态可用），历史 release 快照诊断不在
+   首版范围；原始设计文档不改，偏差以本条为准；
+4. 小项（401/403 注释、store 内 assert、死校验器等）→ **已清理**（D11）；
+5. AGENTS.md"已知边界"两条：紧急维护标志矛盾 → **文档已修复**（D10，
+   OPERATIONS §1 明示改库后不重启 Gateway）；`step_stop_initial` 归属核对
+   缺失 → 仍然成立（保持登记，首次部署失败场景风险低）。
+
+**计划 D 期间新增的登记偏差**（原始设计文档不改，以本节为准）：
+
+- `output.job_log_hard_limit_bytes` / `step_log_soft_limit_bytes`
+  **预留未生效**（D9 声明降级）：deploy_verify 至多 3 个 spool 步骤 × 20 MiB
+  上界 = 60 MiB，永不触及 100 MiB job 上限；字段保留以维持 schema 稳定，
+  排序校验仍生效（模型 docstring 与样例 YAML 已注明）；
+- compose `--env-file` 路径由 MVP §3/§4 的 `/etc/drawbridge/compose/empty.env`
+  字面量改为**按 `paths.config_dir` 解析**（D13）：语义不变（仍钉死插值、防
+  项目目录 `.env` 隐式加载）；标准部署解析结果与字面量一致；
+- `check_project_config.sh` 同样由固定 `/etc` 路径改为按 `paths.config_dir`
+  解析（D13，同族修正）。
 
 ---
 
 ## 5. 当前状态
 
-- 代码基线 `main @ 922b22c`；质量门三绿（见文首核查方式）。
-- 910B 实机进度：**simulation 运行时已从零部署并完成 MCP 全链路验收**
-  （initialize / tools_list / catalog / status / git_status / plan / apply /
-  deploy succeeded / logs / compose_status；8×910B2 NPU 只读观测通过，
-  npu-smi 24.1.rc2）。切生产（`runtime: compose` + Docker + rootless BuildKit +
-  `/dev/davinci2` 设备挂载登记）为下一步，验收清单与前置任务见 OPTIMIZATION_D。
+- 计划 D（D0–D16）**全部实施完毕**（2026-09-26，16 个独立提交
+  `96a894f`…`1ad45d4`）；质量门三绿：352 passed / 4 skipped、ruff 零告警、
+  mypy strict 零告警、**全量回归无警告输出**（unraisable 已消除）。
+  逐任务验收留痕（命令/结果/未验收项）见
+  [docs/VERIFICATION_RECORD.md](../docs/VERIFICATION_RECORD.md)。
+- 910B 实机进度：simulation 运行时从零部署 + MCP 全链路验收（2026-09-22）；
+  NPU 只读观测通过。**切生产操作尚未执行**：D1–D4/D12/D13/D16 的 910B
+  实机验收条目（双账号 state.db、真实 BuildKit 构建、compose 生产部署、
+  `/dev/davinci2` 挂载、模式切换、回滚/中断恢复）按 VERIFICATION_RECORD
+  的未验收清单在切生产时逐项执行并回填——切生产前置代码条件已全部就位。

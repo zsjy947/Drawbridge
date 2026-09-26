@@ -67,9 +67,11 @@ uv run drawbridge-simulate             # 无 systemd 的全链路通信测试（
    自动标记 needs_attention、`drawbridge-init-config` 配置骨架生成
    （实现核查见 [plans/UPGRADED_ARCHITECTURE.md](plans/UPGRADED_ARCHITECTURE.md)）
 8. 🔶 待在 910B 上完成：真实示例应用的完整发布/回滚/漂移验收（MVP §10 清单）、
-   低权限 profile 账号隔离的落地实施（见 docs/PROFILES.md）；
-   切生产就绪与审查修复的规划见
-   [plans/OPTIMIZATION_D_PRODUCTION_CUTOFF_AND_REVIEW_FIXES.md](plans/OPTIMIZATION_D_PRODUCTION_CUTOFF_AND_REVIEW_FIXES.md)
+   低权限 profile 账号隔离的落地实施（见 docs/PROFILES.md）。切生产就绪的
+   代码前置（计划 D：模板指纹、原子完成、跨运行时基线、BuildKit 交接等）
+   已全部实施（见 [plans/UPGRADED_ARCHITECTURE.md](plans/UPGRADED_ARCHITECTURE.md)
+   与 [docs/VERIFICATION_RECORD.md](docs/VERIFICATION_RECORD.md)），实机验收
+   条目按记录文档在切生产时逐项执行
 
 注意：operations.yaml 中的 argv 模板目前仅用于参数 schema 声明与配置摘要冻结，
 实际 argv 在代码中固定（与 MVP §4/§5 一致）；管理员调整执行行为需修改代码并
