@@ -1,7 +1,8 @@
 """ops_history and retention enforcement tests (optimization plan A).
 
-Covers the acceptance criteria from
-``plans/OPTIMIZATION_A_OPERATIONAL_VISIBILITY.md``:
+Covers the acceptance criteria recorded in
+``plans/UPGRADED_ARCHITECTURE.md`` (§2.4/§2.5, formerly optimization
+plan A):
 
 * bounded releases/jobs/events history with rollback eligibility and
   cursor pagination; strict parameter validation;

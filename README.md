@@ -61,13 +61,15 @@ uv run drawbridge-simulate             # 无 systemd 的全链路通信测试（
    Windows 开发机与 910B 均可运行（见 [docs/SIMULATION.md](docs/SIMULATION.md)）
 6. ✅ 运维可见性与保留策略：`ops_history` 有界历史查询（releases/jobs/events，
    回滚选版入口）+ Runner 内置保留清理任务（幂等键/plans/终态 job/日志目录；
-   见 [plans/OPTIMIZATION_A_OPERATIONAL_VISIBILITY.md](plans/OPTIMIZATION_A_OPERATIONAL_VISIBILITY.md)）
+   实现核查见 [plans/UPGRADED_ARCHITECTURE.md](plans/UPGRADED_ARCHITECTURE.md)）
 7. ✅ 通信验收与运行恢复（优化计划 B）：`drawbridge-simulate --http`（边缘
    中间件 + MCP Streamable HTTP + token 正负例）、Runner 启动时心跳超时 job
    自动标记 needs_attention、`drawbridge-init-config` 配置骨架生成
-   （见 [plans/OPTIMIZATION_B_HTTP_ACCEPTANCE_AND_RECOVERY.md](plans/OPTIMIZATION_B_HTTP_ACCEPTANCE_AND_RECOVERY.md)）
+   （实现核查见 [plans/UPGRADED_ARCHITECTURE.md](plans/UPGRADED_ARCHITECTURE.md)）
 8. 🔶 待在 910B 上完成：真实示例应用的完整发布/回滚/漂移验收（MVP §10 清单）、
-   低权限 profile 账号隔离的落地实施（见 docs/PROFILES.md）
+   低权限 profile 账号隔离的落地实施（见 docs/PROFILES.md）；
+   切生产就绪与审查修复的规划见
+   [plans/OPTIMIZATION_D_PRODUCTION_CUTOFF_AND_REVIEW_FIXES.md](plans/OPTIMIZATION_D_PRODUCTION_CUTOFF_AND_REVIEW_FIXES.md)
 
 注意：operations.yaml 中的 argv 模板目前仅用于参数 schema 声明与配置摘要冻结，
 实际 argv 在代码中固定（与 MVP §4/§5 一致）；管理员调整执行行为需修改代码并
