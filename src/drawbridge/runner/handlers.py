@@ -224,10 +224,14 @@ async def run_config_read(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
 
 
 async def run_project_list(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
+    # Defense in depth (invariant 2): the Gateway validated these bounds;
+    # the Runner re-checks so a malformed params dict cannot reach the scan.
+    limit = _bounded_int(job.params.get("limit", 100), 1, 200, "limit")
     return handle_project_list(
         ctx.builtin_context(job.app, job.environment),
         job.params.get("subdir", "."),
         cursor=job.params.get("cursor"),
+        limit=limit,
     )
 
 

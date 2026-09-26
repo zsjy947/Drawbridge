@@ -104,6 +104,13 @@ operations:
         default: "."
         max_length: 200
         validators: [registered_subdir]
+      # cursor drives offset paging; the default "0" is the first page
+      cursor:
+        type: string
+        default: "0"
+        max_length: 512
+        validators: [opaque_cursor]
+      limit: {type: integer, default: 100, minimum: 1, maximum: 200}
 
   config_validate:
     handler: config_validate

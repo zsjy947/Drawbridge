@@ -932,12 +932,23 @@ class Store:
         return row_to_release(row) if row is not None else None
 
     async def list_releases(
-        self, app: str, environment: str, limit: int = 20
+        self,
+        app: str,
+        environment: str,
+        limit: int = 20,
+        *,
+        before_created_at: float | None = None,
     ) -> list[ReleaseRecord]:
-        async with self.db.conn.execute(
+        """Newest-first bounded release history for one target (D8: the
+        ``before_created_at`` cursor mirrors the jobs/events pagination)."""
+        query = (
             "SELECT * FROM releases WHERE app = ? AND environment = ?"
-            " ORDER BY created_at DESC LIMIT ?",
-            (app, environment, limit),
+            " AND (? IS NULL OR created_at < ?)"
+            " ORDER BY created_at DESC LIMIT ?"
+        )
+        async with self.db.conn.execute(
+            query,
+            (app, environment, before_created_at, before_created_at, limit),
         ) as cursor:
             rows = await cursor.fetchall()
         return [row_to_release(r) for r in rows]

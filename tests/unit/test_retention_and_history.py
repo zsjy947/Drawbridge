@@ -96,6 +96,35 @@ async def test_history_releases_marks_current_and_rollback_eligibility(env) -> N
     assert data["releases"][0]["release_id"] == second
 
 
+async def test_history_releases_cursor_pagination(env) -> None:
+    """D8: the releases view honours its cursor — two-page traversal sees
+    every release exactly once, newest first, and invalid cursors reject."""
+    _, store, service, _ = env
+    seeded = []
+    for i in range(5):
+        time.sleep(0.001)
+        seeded.append(await seed_release(store, sha=f"{i:x}"))
+    expected_order = list(reversed(seeded))  # newest first
+
+    seen: list[str] = []
+    cursor: str | None = None
+    for _ in range(5):
+        result = await service.ops_history(
+            "demo", "staging", what="releases", limit=2, cursor=cursor
+        )
+        data = result["data"]
+        seen.extend(r["release_id"] for r in data["releases"])
+        cursor = data["next_cursor"]
+        if cursor is None:
+            break
+    assert seen == expected_order
+
+    with pytest.raises(DrawbridgeError, match="cursor"):
+        await service.ops_history("demo", "staging", what="releases", cursor="not-a-ts")
+    with pytest.raises(DrawbridgeError, match="cursor"):
+        await service.ops_history("demo", "staging", what="releases", cursor="99999999999")
+
+
 async def test_history_jobs_and_events_pagination(env) -> None:
     _, store, service, _ = env
     for i in range(5):

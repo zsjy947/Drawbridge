@@ -147,9 +147,11 @@ Runner 按 `drawbridge.yaml` 的 `retention.cleanup_interval_seconds`（默认
 ### 5.2 历史查询
 
 `ops_history(app, environment, what=releases|jobs|events)` 提供有界（≤50 行）
-的目标历史：releases 视图带 `is_current` / `rollback_eligible` 标注，是回滚
-选版的工具入口；jobs 与 events 视图支持游标翻页。审计完整性不变——该工具
-只读取。
+的目标历史：三个视图均支持游标翻页（releases 按 created_at、jobs 按
+queued_at、events 按 ts 递减）。releases 视图带 `is_current` /
+`rollback_eligible` 标注，是回滚选版的工具入口；`project_list` 诊断操作
+同样登记 `cursor`/`limit`（1–200，默认 100）参数并按服务端校验的游标翻页。
+审计完整性不变——这些工具只读取。
 
 ### 5.3 磁盘预算
 

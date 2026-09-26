@@ -127,8 +127,24 @@ def handle_config_read(ctx: BuiltinContext, alias: str) -> dict[str, Any]:
 
 
 def handle_project_list(
-    ctx: BuiltinContext, subdir: str, *, cursor: str | None = None
+    ctx: BuiltinContext,
+    subdir: str,
+    *,
+    cursor: str | None = None,
+    limit: int = 200,
 ) -> dict[str, Any]:
+    """Bounded single-directory listing with cursor pagination (plan D8).
+
+    ``cursor`` is an opaque offset string produced by this handler's own
+    ``next_cursor``; anything else is rejected, never silently restarted
+    from the top.  ``limit`` bounds the page size (1-200; the directory
+    scan itself stays capped at PROJECT_LIST_MAX_ENTRIES).
+    """
+    if not 1 <= limit <= 200:
+        raise DrawbridgeError(
+            f"limit must be between 1 and 200 (got {limit})",
+            code=ErrorCode.INVALID_PARAMETER,
+        )
     if ctx.diagnostics_root is None:
         raise DrawbridgeError(
             "diagnostics root is not registered for this environment",
@@ -162,11 +178,19 @@ def handle_project_list(
 
     entries: list[dict[str, Any]] = []
     truncated = scan_truncated
-    start_index = int(cursor) if cursor and cursor.isdigit() else 0
+    if cursor in (None, ""):
+        start_index = 0
+    elif cursor.isdigit() and len(cursor) <= 7:
+        start_index = int(cursor)
+    else:
+        raise DrawbridgeError(
+            "cursor is not a valid project_list cursor",
+            code=ErrorCode.INVALID_PARAMETER,
+        )
     for index, entry in enumerate(scanned):
         if index < start_index:
             continue
-        if len(entries) >= 200:
+        if len(entries) >= limit:
             truncated = True
             break
         try:

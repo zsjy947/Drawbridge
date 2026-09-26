@@ -185,6 +185,37 @@ class TestProjectList:
         assert len(page2["entries"]) >= 50
         assert page2["entries"][0]["name"] != page1["entries"][0]["name"]
 
+    def test_limit_drives_page_size_and_traversal(self, diag_root: Path) -> None:
+        """D8: limit paginates >200-entry directories; cursor traversal sees
+        every entry exactly once in sorted order."""
+        for i in range(230):
+            (diag_root / f"g{i:03d}.txt").write_text(str(i), encoding="utf-8")
+        ctx = make_ctx(diag_root, {})
+        page1 = handle_project_list(ctx, ".", limit=100)
+        assert len(page1["entries"]) == 100
+        assert page1["truncated"] is True
+        page2 = handle_project_list(ctx, ".", cursor=page1["next_cursor"], limit=100)
+        page3 = handle_project_list(ctx, ".", cursor=page2["next_cursor"], limit=100)
+        names = [e["name"] for p in (page1, page2, page3) for e in p["entries"]]
+        assert len(names) == len(set(names))  # no overlap across pages
+        assert names == sorted(names)  # sorted globally across pages
+        assert len(names) >= 230
+
+    def test_invalid_cursor_strictly_rejected(self, diag_root: Path) -> None:
+        """D8: a charset-valid but non-numeric cursor must fail, not silently
+        restart paging from the top."""
+        ctx = make_ctx(diag_root, {})
+        with pytest.raises(DrawbridgeError, match="cursor"):
+            handle_project_list(ctx, ".", cursor="abc")
+        with pytest.raises(DrawbridgeError, match="cursor"):
+            handle_project_list(ctx, ".", cursor="0;rm")
+
+    def test_limit_bounds_enforced(self, diag_root: Path) -> None:
+        ctx = make_ctx(diag_root, {})
+        for bad in (0, 201, -1):
+            with pytest.raises(DrawbridgeError, match="limit"):
+                handle_project_list(ctx, ".", limit=bad)
+
     @pytest.mark.skipif(os.name == "nt", reason="mkfifo is POSIX-only")
     def test_special_file_type_reported_other(self, diag_root: Path) -> None:
         fifo = diag_root / "pipe"

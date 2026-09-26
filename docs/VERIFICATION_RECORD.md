@@ -155,3 +155,17 @@
   变更容量判定（per_target=2 仍可接纳变更）；既有维护/阻断豁免回归通过
 - 实现注记：额度以库内 queued+running 诊断 job 计数（终态即回收，跨
   Gateway 重启保持），优于纯进程内计数器（避免 pending 超时后额度泄漏）
+
+## 2026-09-26 — D8 分页收口（releases 游标 + project_list 参数对齐）
+
+- 环境：`Windows 逻辑验证`
+- commit：见本条目对应提交（feat: pagination closure for history and project_list）
+- 命令：`uv run pytest tests/unit/test_retention_and_history.py
+  tests/unit/test_builtin_handlers.py -q`；全量 `uv run pytest -q`
+- 结果：releases 两页遍历完整性（5 条 limit=2 恰好遍历、newest first、
+  无重复）、非法/越界 cursor 拒绝；project_list 以 limit=100 三页遍历 230
+  条目（全局有序无重叠）、非数字 cursor 严格拒绝（不再静默回到首页）、
+  limit 0/201/-1 拒绝；全量 333 passed
+- 参数面：project_list 登记 `cursor`（opaque_cursor，默认 "0"=首页）与
+  `limit`（1–200，默认 100），对齐 MVP §4；`config_read` 可选 release_id
+  裁决为显式降级（偏差登记于 UPGRADED_ARCHITECTURE §4）

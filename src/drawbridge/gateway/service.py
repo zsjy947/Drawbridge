@@ -668,7 +668,12 @@ class GatewayService:
         page_size = limit + 1  # fetch one extra row to detect the next page
 
         if what == "releases":
-            releases = await self.store.list_releases(app, environment, limit=page_size)
+            before_created: float | None = None
+            if cursor is not None:
+                before_created = _parse_history_cursor(cursor)
+            releases = await self.store.list_releases(
+                app, environment, limit=page_size, before_created_at=before_created
+            )
             has_more = len(releases) > limit
             releases = releases[:limit]
             current = await self.store.get_current_release(app, environment)
