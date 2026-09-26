@@ -351,16 +351,31 @@ class Runner:
         except DrawbridgeError as exc:
             await self._finish_with_event(job, JobStatus.FAILED, {"error": exc.to_dict()})
         except asyncio.CancelledError:
-            await self._finish_with_event(
-                job,
-                JobStatus.NEEDS_ATTENTION,
-                {
-                    "error": {
-                        "code": "NEEDS_ATTENTION",
-                        "message": "runner stopped mid-job; verify the actual scene",
-                    }
-                },
-            )
+            if job.kind == JobKind.DIAGNOSTIC:
+                # Read-only work: no scene to verify, and a cancelled
+                # diagnostic must never block the target's mutations
+                # (review remediation).
+                await self._finish_with_event(
+                    job,
+                    JobStatus.FAILED,
+                    {
+                        "error": {
+                            "code": "TIMEOUT",
+                            "message": "runner stopped mid-diagnostic; retry the read",
+                        }
+                    },
+                )
+            else:
+                await self._finish_with_event(
+                    job,
+                    JobStatus.NEEDS_ATTENTION,
+                    {
+                        "error": {
+                            "code": "NEEDS_ATTENTION",
+                            "message": "runner stopped mid-job; verify the actual scene",
+                        }
+                    },
+                )
             raise
         except Exception as exc:
             await self._finish_with_event(
@@ -383,14 +398,26 @@ class Runner:
         result: dict[str, Any] | None,
         recovery: dict[str, Any] | None = None,
     ) -> None:
-        """Terminal transition plus the append-only audit event."""
-        await self.store.finish_job(
+        """Terminal transition plus the append-only audit event.
+
+        When the transition did not happen (the job was reconciled or
+        requeued out from under this runner — finish_job returns False),
+        no job_finished event is appended: the audit chain must never
+        describe a state change that did not occur (review remediation)."""
+        happened = await self.store.finish_job(
             job.job_id,
             status=status,
             result=result,
             recovery=recovery,
             owner=self.instance_id,
         )
+        if not happened:
+            log.warning(
+                "job finish skipped: no longer running here",
+                job_id=job.job_id,
+                intended_status=status,
+            )
+            return
         await self.store.append_event(
             "job_finished",
             job_id=job.job_id,
@@ -451,11 +478,31 @@ class Runner:
                 )
                 raise
             except TimeoutError:
-                await self._finish_with_event(
-                    job,
-                    JobStatus.FAILED,
-                    {"error": {"code": "TIMEOUT", "message": "deploy deadline exceeded"}},
-                )
+                # A deadline firing AFTER the runtime change started means
+                # the scene is mid-mutation and unverified — that is a
+                # needs_attention, not a plain failure (review remediation;
+                # the admission deadline already includes the recovery
+                # budget, so reaching here means both were exhausted).
+                current = await self.store.get_job(job.job_id)
+                if current.runtime_change_started:
+                    await self._finish_with_event(
+                        job,
+                        JobStatus.NEEDS_ATTENTION,
+                        {
+                            "error": {
+                                "code": "NEEDS_ATTENTION",
+                                "message": "deploy deadline exceeded after the "
+                                "runtime change started; verify the actual "
+                                "scene before any further change",
+                            }
+                        },
+                    )
+                else:
+                    await self._finish_with_event(
+                        job,
+                        JobStatus.FAILED,
+                        {"error": {"code": "TIMEOUT", "message": "deploy deadline exceeded"}},
+                    )
                 return
             except DrawbridgeError as exc:
                 await self._finish_with_event(job, JobStatus.FAILED, {"error": exc.to_dict()})
@@ -474,15 +521,25 @@ class Runner:
                 return
             if staged is not None:
                 # Atomic success completion (D4): release + artifacts +
-                # events + job terminal state in one transaction.
-                await self.store.complete_job_with_release(
-                    job=job,
-                    terminal_status=status,
-                    result=result,
-                    recovery=recovery,
-                    owner=self.instance_id,
-                    staged=[staged],
-                )
+                # events + job terminal state in one transaction.  Guarded
+                # like every other terminal path — a refusal (job no longer
+                # running here) degrades to a logged failure instead of an
+                # unhandled task exception (review remediation).
+                try:
+                    await self.store.complete_job_with_release(
+                        job=job,
+                        terminal_status=status,
+                        result=result,
+                        recovery=recovery,
+                        owner=self.instance_id,
+                        staged=[staged],
+                    )
+                except DrawbridgeError as exc:
+                    log.error(
+                        "atomic completion refused; job left for reconcile",
+                        job_id=job.job_id,
+                        error=str(exc),
+                    )
             else:
                 await self._finish_with_event(job, status, result, recovery)
         finally:

@@ -313,19 +313,28 @@ class Store:
     async def _check_target_not_blocked(
         self, conn: Any, app: str, environment: str
     ) -> None:
-        placeholders = ",".join("?" * len(BLOCKING_STATUSES))
-        query = (
-            "SELECT job_id FROM jobs WHERE app = ? AND environment = ?"  # noqa: S608
-            " AND status IN (" + placeholders + ") LIMIT 1"
-        )
-        async with conn.execute(query, (app, environment, *BLOCKING_STATUSES)) as cursor:
-            row = await cursor.fetchone()
-        if row is not None:
+        if await self._target_blocked(conn, app, environment):
             raise DrawbridgeError(
                 "target is blocked by an unresolved "
                 "rollback_failed/needs_attention job; reconcile the scene first",
                 code=ErrorCode.NEEDS_ATTENTION,
             )
+
+    @staticmethod
+    async def _target_blocked(conn: Any, app: str, environment: str) -> bool:
+        """Blocking probe for MUTATION targets: diagnostic jobs never block
+        (they are read-only; a cancelled diagnostic must not freeze a
+        target's deploys — review remediation)."""
+        placeholders = ",".join("?" * len(BLOCKING_STATUSES))
+        query = (
+            "SELECT job_id FROM jobs WHERE app = ? AND environment = ?"  # noqa: S608
+            " AND kind != ? AND status IN (" + placeholders + ") LIMIT 1"
+        )
+        async with conn.execute(
+            query, (app, environment, JobKind.DIAGNOSTIC, *BLOCKING_STATUSES)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row is not None
 
     async def _check_capacity(
         self,
@@ -414,6 +423,11 @@ class Store:
         """
         now = time.time() if now is None else now
         conn = self.db.conn
+        if not kinds:
+            raise DrawbridgeError(
+                "claim_next_job requires at least one job kind",
+                code=ErrorCode.INTERNAL,
+            )
         placeholders = ",".join("?" * len(kinds))
         skip_targets = skip_targets or {}
         async with self.db.write_lock():
@@ -466,6 +480,17 @@ class Store:
                         until = skip_targets.get(target)
                         if until is not None and now < until:
                             continue
+                    if job.kind != JobKind.DIAGNOSTIC and await self._target_blocked(
+                        conn, job.app, job.environment
+                    ):
+                        # Admission checks blocking once, at enqueue time;
+                        # a target that flipped to rollback_failed/
+                        # needs_attention afterwards must not dispatch
+                        # already-queued mutations on an unreconciled scene
+                        # (review remediation).  The job stays queued —
+                        # after the operator reconciles, it dispatches; if
+                        # not, queue expiry eventually retires it.
+                        continue
                     await conn.execute(
                         "UPDATE jobs SET status = ?, owner = ?, started_at = ?,"
                         " heartbeat_at = ?, deadline_at = ?"
@@ -600,7 +625,16 @@ class Store:
         result: dict[str, Any] | None = None,
         recovery: dict[str, Any] | None = None,
         owner: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """Flip a RUNNING job into a terminal state; returns whether the
+        transition happened.
+
+        The ``status = running`` precondition (review remediation) keeps a
+        stale runner finish from overwriting a reconciler's needs_attention
+        verdict — a 0-row update returns False and the caller must NOT
+        append a job_finished event describing a transition that never
+        happened.
+        """
         if status not in JobStatus.TERMINAL:
             raise DrawbridgeError(
                 f"cannot finish job into non-terminal status {status!r}",
@@ -609,20 +643,24 @@ class Store:
         now = time.time()
         async with self.db.write_lock():
             if owner is not None:
-                await self.db.conn.execute(
+                cursor = await self.db.conn.execute(
                     "UPDATE jobs SET status = ?, result_json = ?, recovery_json = ?,"
-                    " finished_at = ? WHERE job_id = ? AND owner = ?",
+                    " finished_at = ? WHERE job_id = ? AND owner = ? AND status = ?",
                     (status, dumps(result) if result else None,
-                     dumps(recovery) if recovery else None, now, job_id, owner),
+                     dumps(recovery) if recovery else None, now, job_id, owner,
+                     JobStatus.RUNNING),
                 )
             else:
-                await self.db.conn.execute(
+                cursor = await self.db.conn.execute(
                     "UPDATE jobs SET status = ?, result_json = ?, recovery_json = ?,"
-                    " finished_at = ? WHERE job_id = ?",
+                    " finished_at = ? WHERE job_id = ? AND status = ?",
                     (status, dumps(result) if result else None,
-                     dumps(recovery) if recovery else None, now, job_id),
+                     dumps(recovery) if recovery else None, now, job_id,
+                     JobStatus.RUNNING),
                 )
+            updated = cursor.rowcount == 1
             await self.db.conn.commit()
+        return updated
 
     async def complete_job_with_release(
         self,
@@ -724,11 +762,14 @@ class Store:
                             dumps(item.event_detail),
                         ),
                     )
+                # status = running precondition: a stale runner must never
+                # overwrite a reconciler's needs_attention verdict (review
+                # remediation) — the whole transaction rolls back instead.
                 if owner is not None:
                     cursor = await conn.execute(
                         "UPDATE jobs SET status = ?, result_json = ?,"
                         " recovery_json = ?, finished_at = ? WHERE job_id = ?"
-                        " AND owner = ?",
+                        " AND owner = ? AND status = ?",
                         (
                             terminal_status,
                             dumps(result) if result else None,
@@ -736,23 +777,27 @@ class Store:
                             now,
                             job.job_id,
                             owner,
+                            JobStatus.RUNNING,
                         ),
                     )
                 else:
                     cursor = await conn.execute(
                         "UPDATE jobs SET status = ?, result_json = ?,"
-                        " recovery_json = ?, finished_at = ? WHERE job_id = ?",
+                        " recovery_json = ?, finished_at = ? WHERE job_id = ?"
+                        " AND status = ?",
                         (
                             terminal_status,
                             dumps(result) if result else None,
                             dumps(recovery) if recovery else None,
                             now,
                             job.job_id,
+                            JobStatus.RUNNING,
                         ),
                     )
                 if cursor.rowcount != 1:
                     raise DrawbridgeError(
-                        "job disappeared before atomic completion",
+                        "job is not in the running state anymore (reconciled or"
+                        " requeued); refusing the atomic completion",
                         code=ErrorCode.INTERNAL,
                     )
                 await conn.execute(
@@ -1136,11 +1181,15 @@ class Store:
                 )
                 expired_plans = cursor.rowcount or 0
 
-                # Terminal diagnostic jobs past the diagnostic retention.
+                # Terminal diagnostic jobs past the diagnostic retention
+                # (blocking diagnostics — a legacy artifact now that they
+                # cannot block — are still kept for scene evidence parity).
                 diag_cutoff = now - diagnostic_job_seconds
+                blocking = ",".join("?" * len(BLOCKING_STATUSES))
                 cursor = await conn.execute(
-                    "SELECT job_id FROM jobs WHERE kind = ? AND finished_at < ?",
-                    (JobKind.DIAGNOSTIC, diag_cutoff),
+                    "SELECT job_id FROM jobs WHERE kind = ? AND finished_at < ?"  # noqa: S608
+                    " AND status NOT IN (" + blocking + ")",
+                    (JobKind.DIAGNOSTIC, diag_cutoff, *BLOCKING_STATUSES),
                 )
                 doomed = [r["job_id"] for r in await cursor.fetchall()]
 

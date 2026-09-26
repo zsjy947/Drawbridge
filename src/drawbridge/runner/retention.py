@@ -89,9 +89,7 @@ async def run_retention(config: DrawbridgeConfig, store: Store) -> dict[str, Any
     removed_job_ids = list(counts.pop("removed_job_ids"))
     counts["log_dirs"] = len(_remove_log_dirs(Path(config.main.paths.log_dir), removed_job_ids))
     counts["job_work_dirs"] = len(_remove_job_work_dirs(config, removed_job_ids))
-    if any(value for key, value in counts.items() if key not in ("log_dirs",)) or (
-        counts["log_dirs"] or counts["job_work_dirs"]
-    ):
+    if any(counts.values()):
         await store.append_event("retention_cleanup", detail=dict(counts))
         log.info("retention cleanup", **counts)
     return counts

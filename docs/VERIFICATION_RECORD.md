@@ -271,3 +271,65 @@
   setgid 备选仅文档化；DEPLOYMENT §2 补交接目录创建步骤
 - 未验收：910B 真实 rootless 构建一次通过且摘要核对成功（§5 切生产清单
   第 8 步前置）——待实机执行后回填
+
+
+## 2026-09-26 — D9/D10 补录（纯文档任务）
+
+- 环境：`Windows 逻辑验证`
+- commit：`b5658b1`（D9：job 级日志预算声明降级——模型 docstring/样例/
+  initconfig 注明"预留未生效"，schema 校验保留）；`4cede2d`（D10：
+  OPERATIONS §1 紧急维护路径改为"改库后不重启 Gateway"）
+- 命令：`uv run pytest tests/unit/test_config_models.py -q`（39 passed）
+- 结果：文档级变更，与代码行为逐句核对通过
+
+## 2026-09-26 — 更正：D1 条目中"OPERATIONS §8"引用
+
+- D1 条目所写"OPERATIONS §8 同步"在 D12 插入模式切换章节后已错位——
+  UMask/DeviceAllow 相关说明现位于 **OPERATIONS §9（NPU 节）** 与
+  deploy/*.service 本体。UPGRADED_ARCHITECTURE 已同步更正。
+
+## 2026-09-26 — 全量代码审查（三路并行，计划 D 收尾）
+
+- 环境：`Windows 逻辑验证`
+- 基线：`dccc0c2..690208b`（计划 D 全部 20 个提交，61 文件 +4710/-1102）
+- 方式：三个独立审查通道（状态/网关层、runner 执行层、配置/executor/文档
+  一致性）+ 质量门实测；随后逐项核实并修复
+- 审查结论：**无 BLOCKER**；AGENTS 十条不变量复核成立（exec-only 固定
+  argv、单事务准入、审计只追加、最小暴露面、simulation 非旁路等）。
+  发现 3 个 MAJOR + 8 个 MINOR + 若干 NIT，修复如下（commit 见下）：
+  1. **派发期阻断缺失**（存量）：claim_next_job 在 BEGIN IMMEDIATE 内
+     复查目标阻断状态，已排队变更在 reconcile 前不再派发（诊断豁免）；
+  2. **终态覆盖竞态**（存量，D4 放大）：finish_job /
+     complete_job_with_release 增加 `status=running` 前置条件——reconcile
+     的 needs_attention 裁决不再被滞后 runner 完成覆盖；幻影
+     job_finished 事件随 finish_job 布尔返回消除；
+  3. **取消的诊断 job 变成阻断态**（D11⑩引入）：取消诊断 → FAILED（只读
+     无现场）；诊断 kind 不再参与目标阻断判定；retention 诊断查询补
+     阻断豁免；
+  4. **外层 deadline 不含恢复预算**（存量）：apply 准入 deadline =
+     workflow + recovery 预算；运行时变更已开始后的超时翻
+     needs_attention 而非 FAILED；
+  5. **spool 打开失败泄漏子进程**（存量）：spool 文件先于 spawn 打开，
+     失败返回结构化 start_error，不再有孤儿进程/裸 OSError；
+  6. **_execute_deploy 未守护原子完成**：拒绝时降级为日志 + reconcile，
+     不再产生未处理任务异常；
+  7. 其余：恢复路径取消不再被吞成 ROLLBACK_FAILED（重抛）、git_log count
+     边界复查（去 int() 强转）、回滚 compose up 补 spool 日志、MCP 缺参
+     KeyError → INVALID_PARAMETER 工具错误（不再协议层 internal error）、
+     诊断 queue_expired → QUEUE_TIMEOUT、非 UTF-8 模板 → CONFIG_INVALID、
+     artifact 行补 archive sha256/size、retention 条件化简、空 kinds
+     守卫、DeviceAllow=char-uart 注释、DEPLOYMENT 补 builder 账号交叉
+     引用、simulate fixture 与样例模板对齐 import_timeout_seconds、
+     偏差登记扩至四个诊断操作的 release_id/validator
+- 修复验证：`uv run pytest -q`（359 passed / 4 skipped）+ ruff + mypy
+  strict 三绿；新增 tests/unit/test_review_remediation.py（6 项回归：
+  派发期阻断延迟、终态覆盖拒绝、取消诊断非阻断、spool start_error、
+  GBK 模板拒绝、MCP 缺参工具错误）
+- 附注：uv.lock 在 D2 提交中出现 registry 镜像切换（pypi.org →
+  mirrors.aliyun.com，本机 uv 配置所致）；版本与哈希完全一致，
+  `uv sync --frozen` 行为不变，判定为无害噪音、保留
+- 审查保留项（不修，已登记）：历史时间戳同值行的游标翻页理论跳行
+  （keyset 分页固有，测试用 1ms 间隔规避）；诊断 job 无 job_admitted
+  事件（与写路径不对称的设计取舍）；_step_budget 使用总预算而非剩余
+  （外层 deadline 已界定位真上界）；v2 迁移 evidence LIKE 回填为有限
+  启发式（仅存量行、影响面为标记而非安全属性）

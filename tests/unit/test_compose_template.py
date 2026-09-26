@@ -149,3 +149,13 @@ class TestLoadTimeValidation:
         )
         with pytest.raises(ConfigInvalidError, match="do not match"):
             self._load(bundle)
+
+    def test_missing_template_skipped_on_dev_hosts(self) -> None:
+        """The repo sample bundle points compose_file at the production
+        /etc path which does not exist on dev hosts — loading must skip
+        (deferral to plan/apply), never fail (loader.py contract)."""
+        from drawbridge.config.loader import load_config_from_dir
+
+        repo = Path(__file__).resolve().parents[2]
+        config = load_config_from_dir(repo / "configs")
+        assert "demo" in config.apps

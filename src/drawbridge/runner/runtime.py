@@ -455,7 +455,7 @@ class DeployRuntime:
         template = Path(env_cfg.compose_file)
         try:
             template_text = template.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise DrawbridgeError(
                 f"cannot read compose template {template}: {exc}",
                 code=ErrorCode.CONFIG_INVALID,
@@ -1006,7 +1006,12 @@ class DeployRuntime:
         }
 
     async def restore_to_release(
-        self, app: str, environment: str, release: ReleaseRecord
+        self,
+        app: str,
+        environment: str,
+        release: ReleaseRecord,
+        *,
+        job_id: str | None = None,
     ) -> dict[str, Any]:
         """Re-deploy a historical release's frozen artifacts (explicit rollback)."""
         if not _RUNTIME_LINUX:
@@ -1033,6 +1038,9 @@ class DeployRuntime:
             output_policy=OutputPolicyKind.SPOOL,
             max_bytes=self.config.main.output.query_summary_max_bytes,
             hard_limit=self.config.main.output.step_log_hard_limit_bytes,
+            # Review remediation: spool rollback forensics like every other
+            # change step instead of dropping them.
+            log_path=self._log_path(job_id, "rollback") if job_id else None,
         )
         if not up.accepted:
             raise DrawbridgeError(

@@ -270,6 +270,7 @@ class DeployWorkflow:
             created_at=now,
             verified_at=now,
         )
+        build_detail = state.step_results.get("build", {})
         artifact = (
             ArtifactRecord(
                 artifact_id=new_id(),
@@ -278,8 +279,8 @@ class DeployWorkflow:
                 kind="image",
                 ref=state.image_id,
                 release_id=release_id,
-                size_bytes=None,
-                sha256=None,
+                size_bytes=build_detail.get("archive_bytes"),
+                sha256=build_detail.get("archive_sha256"),
                 created_at=now,
                 retention_class="current",
             )
@@ -336,6 +337,11 @@ class DeployWorkflow:
             recovery["recovery_seconds"] = round(
                 time.monotonic() - recovery_started, 3
             )
+        except asyncio.CancelledError:
+            # SIGTERM/shutdown mid-recovery must surface as cancellation so
+            # the loop's NEEDS_ATTENTION path records the unknown scene —
+            # not as a completed ROLLBACK_FAILED (review remediation).
+            raise
         except BaseException as exc:
             recovery = {
                 "status": "recovery_failed",

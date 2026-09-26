@@ -51,6 +51,9 @@ SupplementaryGroups=docker
 #   DeviceAllow=/dev/davinci_manager rw
 #   DeviceAllow=/dev/davinci2 rw
 PrivateDevices=false
+# char-uart: systemd's generic tty class, required for PrivateDevices=false
+# to function without a full device set; NPU nodes are added perDeviceAllow
+# lines above when npu.enabled is turned on.
 DeviceAllow=char-uart rw
 
 [Install]

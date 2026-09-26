@@ -29,6 +29,7 @@ from drawbridge.errors import (
     ForbiddenOperationError,
     InvalidParameterError,
     MaintenanceError,
+    QueueTimeoutError,
     StalePlanError,
     UnknownAppError,
     UnknownEnvironmentError,
@@ -204,6 +205,12 @@ class GatewayService:
             if current.status not in (JobStatus.QUEUED, JobStatus.RUNNING):
                 if current.status == JobStatus.SUCCEEDED:
                     return current.result or {}, ""
+                if current.status == JobStatus.QUEUE_EXPIRED:
+                    # Contract code for queue timeouts — not INTERNAL
+                    # (review remediation).
+                    raise QueueTimeoutError(
+                        "diagnostic request timed out in the queue; retry"
+                    )
                 detail = (current.result or {}).get("error", {})
                 raise DrawbridgeError(
                     str(detail.get("message", f"diagnostic job {current.status}")),
@@ -600,6 +607,10 @@ class GatewayService:
                 f"workflow {plan.workflow!r} is no longer registered",
                 code=ErrorCode.CONFIG_INVALID,
             )
+        # The job deadline must cover the workflow budget AND the recovery
+        # budget: an outer timeout firing after the runtime change started
+        # would otherwise land as a plain FAILED on an unverified scene
+        # (review remediation).
         return await self._admit_write(
             kind=JobKind.DEPLOY,
             action=plan.workflow,
@@ -608,7 +619,10 @@ class GatewayService:
             params={"plan_id": plan.plan_id},
             idempotency_key=idempotency_key,
             request_id=request_id,
-            deadline_seconds=float(workflow.timeout_seconds),
+            deadline_seconds=(
+                float(workflow.timeout_seconds)
+                + float(workflow.recovery_timeout_seconds)
+            ),
             plan_id=plan.plan_id,
             agent_id=agent_id,
             parent_task_id=parent_task_id,

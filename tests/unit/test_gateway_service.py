@@ -177,13 +177,17 @@ class TestDiagnosticAdmissionCap:
             await service.ops_status("demo", "staging")
         assert exc.value.code == ErrorCode.BUSY
         # finish the queued diagnostic → quota recycles, admission works again
-        from drawbridge.state.records import JobStatus
+        from drawbridge.state.records import JobKind, JobStatus
 
         async with store.db.conn.execute(
             "SELECT job_id FROM jobs WHERE kind = 'diagnostic' LIMIT 1"
         ) as cursor:
             row = await cursor.fetchone()
-        await store.finish_job(row["job_id"], status=JobStatus.SUCCEEDED, result={})
+        claimed = await store.claim_next_job(owner="runner-t", kinds=[JobKind.DIAGNOSTIC])
+        assert claimed is not None and claimed.job_id == row["job_id"]
+        await store.finish_job(
+            row["job_id"], status=JobStatus.SUCCEEDED, result={}, owner="runner-t"
+        )
         job = await service._run_diagnostic(
             action="host_metrics",
             app="demo",

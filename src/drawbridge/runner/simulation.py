@@ -353,7 +353,12 @@ class SimulationRuntime(DeployRuntime):
         }
 
     async def restore_to_release(
-        self, app: str, environment: str, release: ReleaseRecord
+        self,
+        app: str,
+        environment: str,
+        release: ReleaseRecord,
+        *,
+        job_id: str | None = None,
     ) -> dict[str, Any]:
         if not release.image_id:
             raise DrawbridgeError(
@@ -429,10 +434,17 @@ class RuntimeSelector:
         )
 
     async def restore_to_release(
-        self, app: str, environment: str, release: ReleaseRecord
+        self,
+        app: str,
+        environment: str,
+        release: ReleaseRecord,
+        *,
+        job_id: str | None = None,
     ) -> dict[str, Any]:
         adapter = self.adapter_for(app, environment)
-        return await adapter.restore_to_release(app, environment, release)
+        return await adapter.restore_to_release(
+            app, environment, release, job_id=job_id
+        )
 
 
 def build_runtime(

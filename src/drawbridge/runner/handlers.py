@@ -211,7 +211,10 @@ async def run_git_status(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
 
 async def run_git_log(ctx: JobContext, job: JobRecord) -> dict[str, Any]:
     client = ctx.git_client(job.app)
-    entries = await client.log(job.params["git_ref"], count=int(job.params.get("count", 20)))
+    # Defensive bound re-check only — the Gateway already validated; no
+    # implicit coercion of a malformed params dict (review remediation).
+    count = _bounded_int(job.params.get("count", 20), 1, 100, "count")
+    entries = await client.log(job.params["git_ref"], count=count)
     return {
         "commits": [
             {"sha": e.sha, "commit_time": e.commit_time, "subject": e.subject} for e in entries
@@ -665,7 +668,9 @@ async def run_release_rollback(ctx: JobContext, job: JobRecord) -> dict[str, Any
             f"release {target.release_id} cannot be rolled back to (status {target.status})",
             code=ErrorCode.INVALID_PARAMETER,
         )
-    restore = await runtime.restore_to_release(job.app, job.environment, target)
+    restore = await runtime.restore_to_release(
+        job.app, job.environment, target, job_id=job.job_id
+    )
 
     from drawbridge.state.store import new_id
 

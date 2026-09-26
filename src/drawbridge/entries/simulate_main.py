@@ -310,6 +310,7 @@ build_profiles:
     platform: linux/arm64
     timeout_seconds: 300
     max_parallel: 1
+    import_timeout_seconds: 300
 """,
         encoding="utf-8",
     )

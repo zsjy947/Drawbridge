@@ -143,7 +143,7 @@
   AGENTS.md 质量门补一键命令。
 - **D1 systemd 权限**：两 unit `UMask=0007`（双账号共享 state.db 组可写）、
   runner `SupplementaryGroups=docker`、NPU DeviceAllow 注释模板；
-  DEPLOYMENT §2 / OPERATIONS §8 同步。
+  DEPLOYMENT §2 / OPERATIONS §9（NPU 节，审查更正：原引 §8 已被 D12 模式切换章节占用）同步。
 - **D2 构建前端防护**：`scan_dockerfile_directives` 纯文本扫描，`# syntax=`
   → `BUILD_UNSUPPORTED_FRONTEND`（任何 buildctl 调用之前拒绝）；escape/check
   放行并记入步骤结果。
@@ -250,9 +250,11 @@
 1. `ops_history` releases 游标不可用（A 遗留）→ **已修复**（D8，`bd737bc`）；
 2. `project_list` 参数与 MVP §4 不一致 → **已对齐**（D8：cursor/limit 登记，
    非法 cursor 严格拒绝）；
-3. `config_read` 的"可选 release_id"（MVP §4）→ **裁决为显式降级**（D8）：
+3. 四个诊断操作的"可选 release_id"（MVP §4：`config_read`/`project_list`/
+   `config_validate`/`check_project_config`）→ **裁决为显式降级**（D8）：
    实现固定诊断根（910B 实机已验证该形态可用），历史 release 快照诊断不在
-   首版范围；原始设计文档不改，偏差以本条为准；
+   首版范围；`config_validate` 的 `validator` 参数同样未实现（validators
+   登记为预留插件路径，见 D11 注记）；原始设计文档不改，偏差以本条为准；
 4. 小项（401/403 注释、store 内 assert、死校验器等）→ **已清理**（D11）；
 5. AGENTS.md"已知边界"两条：紧急维护标志矛盾 → **文档已修复**（D10，
    OPERATIONS §1 明示改库后不重启 Gateway）；`step_stop_initial` 归属核对

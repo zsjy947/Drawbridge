@@ -279,6 +279,24 @@ class MCPAppFactory:
                 structured_content=payload,
                 is_error=True,
             )
+        except (KeyError, TypeError) as exc:
+            # A missing/mistyped required argument must surface as a tool
+            # error (contract: errors.py), never as a protocol-level
+            # internal error from the SDK server.
+            payload = {
+                "code": "INVALID_PARAMETER",
+                "message": f"missing or malformed required argument: {exc}",
+                "retryable": False,
+            }
+            return types.CallToolResult(
+                content=[
+                    types.TextContent(
+                        type="text", text=json.dumps(payload, ensure_ascii=True)
+                    )
+                ],
+                structured_content=payload,
+                is_error=True,
+            )
         return types.CallToolResult(
             content=[
                 types.TextContent(

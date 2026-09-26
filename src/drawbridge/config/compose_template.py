@@ -109,9 +109,12 @@ def read_compose_template(
     template_path = Path(path)
     try:
         text = template_path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # Non-UTF-8 templates (Windows-side admin tooling) must fail closed
+        # as CONFIG_INVALID, not escape as a native error on the plan path
+        # (review remediation).
         raise ConfigInvalidError(
-            f"cannot read compose template {template_path}: {exc}"
+            f"cannot read compose template {template_path} as UTF-8: {exc}"
         ) from exc
     parsed = parse_template(text, str(template_path))
     services = validate_structure(text, parsed, declared_services, str(template_path))

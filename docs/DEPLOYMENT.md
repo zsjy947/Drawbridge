@@ -38,6 +38,7 @@ sudo chmod 2770 /var/lib/drawbridge /run/drawbridge /var/log/drawbridge
 
 # 构建产物交接目录（plan D16，必填项 build_output_dir 的实体）：
 # builder 账号可写、runner 组可读；每个登记环境一个
+# （drawbridge-builder 账号的创建见 docs/PROFILES.md §2）
 sudo mkdir -p /srv/drawbridge/build-output/demo/staging
 sudo chown drawbridge-builder:drawbridge /srv/drawbridge/build-output/demo/staging
 sudo chmod 2750 /srv/drawbridge/build-output/demo/staging

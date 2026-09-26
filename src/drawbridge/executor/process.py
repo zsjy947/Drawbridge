@@ -207,6 +207,25 @@ class ProcessManager:
     async def execute(self, spec: ExecutionSpec) -> ExecutionResult:
         started = time.monotonic()
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        # Open the spool file BEFORE spawning (review remediation): a full
+        # disk or unwritable log path used to raise a bare OSError AFTER
+        # the child existed — leaking an unreaped process and escaping as
+        # INTERNAL instead of the structured start error below.
+        try:
+            ledger = _StreamLedger(spec)
+        except OSError as exc:
+            return spec.result(
+                exit_code=None,
+                termination_reason=TERMINATION_START_ERROR,
+                duration_ms=_elapsed_ms(started),
+                stdout_bytes=0,
+                stderr_bytes=0,
+                truncated=False,
+                stdout_preview="",
+                stderr_preview="",
+                log_path=spec.log_path,
+                start_error=f"spool open failed: {type(exc).__name__}: {exc}",
+            )
         try:
             proc = await asyncio.create_subprocess_exec(
                 spec.executable,
@@ -220,6 +239,7 @@ class ProcessManager:
                 creationflags=creationflags,
             )
         except OSError as exc:
+            ledger.close()
             return spec.result(
                 exit_code=None,
                 termination_reason=TERMINATION_START_ERROR,
@@ -232,8 +252,6 @@ class ProcessManager:
                 log_path=spec.log_path,
                 start_error=f"{type(exc).__name__}: {exc}",
             )
-
-        ledger = _StreamLedger(spec)
         stdin_task: asyncio.Task[None] | None = None
         limit_event = asyncio.Event()
         limit_task: asyncio.Task[bool] | None = None

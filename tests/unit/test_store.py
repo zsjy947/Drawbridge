@@ -466,10 +466,11 @@ def test_new_id_shape() -> None:
 class TestTargetBlocking:
     async def test_needs_attention_blocks_mutations_not_reads(self, store: Store) -> None:
         first = await store.admit_job(
-            idempotency_key="blk-00000001", **BASE  # type: ignore[arg-type]
+            idempotency_key="blk-00000001", **{**BASE, "cooldown_seconds": 0}  # type: ignore[arg-type]
         )
+        await store.claim_next_job(owner="runner-blk", kinds=[JobKind.DEPLOY])
         await store.finish_job(
-            first.job_id, status=JobStatus.NEEDS_ATTENTION, owner=None
+            first.job_id, status=JobStatus.NEEDS_ATTENTION, owner="runner-blk"
         )
         with pytest.raises(DrawbridgeError) as exc:
             await store.admit_job(
@@ -502,7 +503,10 @@ class TestTargetBlocking:
         job = await store.admit_job(
             idempotency_key="rec-00000001", **base  # type: ignore[arg-type]
         )
-        await store.finish_job(job.job_id, status=JobStatus.ROLLBACK_FAILED)
+        await store.claim_next_job(owner="runner-rec", kinds=[JobKind.DEPLOY])
+        await store.finish_job(
+            job.job_id, status=JobStatus.ROLLBACK_FAILED, owner="runner-rec"
+        )
         with pytest.raises(DrawbridgeError):
             await store.admit_job(
                 idempotency_key="rec-00000002", **base  # type: ignore[arg-type]
