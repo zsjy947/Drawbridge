@@ -119,3 +119,16 @@
   job_finished）；全量 315 passed
 - 未验收：910B 正常部署与显式回滚各跑一轮核对 releases/events/jobs 记录
   完整——待切生产操作时回填
+
+## 2026-09-26 — D5 Git 本地 config 危险键扫描 + gc.auto=0
+
+- 环境：`Windows 逻辑验证`（真实 git 子进程，隔离 origin，无网络）
+- commit：见本条目对应提交（feat: repo-local git config guard and gc.auto=0）
+- 命令：`uv run pytest tests/integration/test_gitops.py -q`；全量
+  `uv run pytest -q`
+- 结果：25 passed——include/insteadOf 仓库 ls-remote/fetch 被拒且
+  RecordingPM 断言零子进程调用；二进制 config 拒绝；扫描表驱动
+  （含 includeIf/sshCommand/credential/submodule.update/extraHeader 正例、
+  同节良性键负例）；正常仓库全流程通过；`gc.auto=0` 出现在每次实际
+  git argv 断言；全量 320 passed
+- 未验收：910B 真实仓库正常 fetch——待切生产操作时回填

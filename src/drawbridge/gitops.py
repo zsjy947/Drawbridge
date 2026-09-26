@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from drawbridge.config.models import ExecutionProfile, OutputPolicyKind
+from drawbridge.errors import DrawbridgeError, ErrorCode
 from drawbridge.executor.process import ProcessManager
 from drawbridge.executor.spec import ExecutionSpec
 
@@ -25,6 +26,72 @@ _LOG_LINE_RE = re.compile(r"^([0-9a-f]{40})\t([0-9]+)\t(.*)$")
 # repo / output budgets for git operations (MVP spec §2)
 MAX_REMOTE_REFS = 10_000
 REMOTE_OUTPUT_LIMIT = 2 * 1024 * 1024
+
+#: Global options prepended to EVERY git invocation (plan D5): auto-gc on a
+#: large repository can block a fetch far beyond its 120s budget.
+_GIT_GLOBAL_OPTIONS: tuple[str, ...] = ("-c", "gc.auto=0")
+
+#: Repo-local .git/config scan bounds (plan D5): plain-text key matching,
+#: never a git subprocess, and binary or oversized configs are rejected
+#: outright rather than partially scanned.
+REPO_CONFIG_MAX_BYTES = 1024 * 1024
+
+_SECTION_RE = re.compile(r'^\[\s*([A-Za-z0-9.-]+)(?:\s+"((?:[^"\\]|\\.)*)")?\s*\]')
+_KEY_RE = re.compile(r"^([A-Za-z0-9-]+)\s*(?:=|$)")
+
+#: Section names whose every key is rejected (external config inclusion).
+_DANGEROUS_SECTIONS = frozenset({"include", "includeif"})
+
+#: Exact fully-qualified keys rejected regardless of section context.
+_DANGEROUS_FULL_KEYS = frozenset(
+    {
+        "core.sshcommand",
+        "core.hookspath",
+        "http.proxy",
+        "https.proxy",
+        "http.extraheader",
+    }
+)
+
+
+def scan_repo_config_dangerous_keys(text: str) -> list[str]:
+    """Plain-text scan of a repo-local ``.git/config`` (plan D5).
+
+    The hardened git environment (GIT_CONFIG_NOSYSTEM, fixed
+    GIT_CONFIG_GLOBAL, protocol.allow pins) does not cover the repository's
+    OWN config: ``include``/``includeIf`` can pull in external configuration
+    and ``url.<base>.insteadOf`` can rewrite where ``origin`` actually
+    points while the argv still carries the literal ``origin``.  Returns the
+    offending fully-qualified key names; empty means clean.
+    """
+    hits: list[str] = []
+    section = ""
+    subsection = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line[0] in "#;":
+            continue
+        section_match = _SECTION_RE.match(line)
+        if section_match:
+            section = section_match.group(1).lower()
+            subsection = (section_match.group(2) or "").lower()
+            if section in _DANGEROUS_SECTIONS:
+                hits.append(f"[{section}]")
+            continue
+        key_match = _KEY_RE.match(line)
+        if key_match and section:
+            key = key_match.group(1).lower()
+            if section in _DANGEROUS_SECTIONS:
+                continue  # the section header itself was already reported
+            full = f"{section}.{subsection}.{key}" if subsection else f"{section}.{key}"
+            if (
+                full in _DANGEROUS_FULL_KEYS
+                or (section == "credential")
+                or (section == "url" and subsection and key in ("insteadof", "pushinsteadof"))
+                or (section == "submodule" and key == "update")
+            ):
+                hits.append(full)
+    return hits
 
 
 class GitError(Exception):
@@ -57,6 +124,40 @@ class GitClient:
         self._repo = repo_path
         self._env = env
         self._pm = process_manager
+        self._repo_config_checked = False
+
+    async def _guard_repo_local_config(self) -> None:
+        """One-time scan of ``<repo>/.git/config`` before remote contact.
+
+        Runs before ls-remote/fetch (the only remote-touching paths) and is
+        deduplicated per client instance.  A missing config file is left to
+        the git invocation itself; unreadable/oversized/binary content is
+        rejected rather than partially trusted.
+        """
+        if self._repo_config_checked:
+            return
+        self._repo_config_checked = True
+        path = Path(self._repo) / ".git" / "config"
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return
+        if len(data) > REPO_CONFIG_MAX_BYTES or b"\x00" in data:
+            raise DrawbridgeError(
+                f"repository local git config {path} is oversized or binary; "
+                "refusing to touch the remote until it is cleaned up",
+                code=ErrorCode.REPO_CONFIG_REJECTED,
+            )
+        hits = scan_repo_config_dangerous_keys(
+            data.decode("utf-8", errors="replace")
+        )
+        if hits:
+            raise DrawbridgeError(
+                "repository local git config contains rejected keys: "
+                + ", ".join(hits[:5])
+                + f"; remove them from {path} before any fetch or ref listing",
+                code=ErrorCode.REPO_CONFIG_REJECTED,
+            )
 
     async def _run(
         self,
@@ -70,7 +171,7 @@ class GitClient:
         spec = ExecutionSpec(
             operation="git",
             executable=self._git,
-            argv=argv,
+            argv=(*_GIT_GLOBAL_OPTIONS, *argv),
             cwd=cwd or self._repo,
             env=self._env,
             profile=ExecutionProfile.SOURCE_MANAGE,
@@ -141,6 +242,7 @@ class GitClient:
 
     async def enumerate_remote_refs(self) -> dict[str, str]:
         """``ls-remote --refs origin`` — the only live remote contact."""
+        await self._guard_repo_local_config()
         result = self._require(
             await self._run(
                 ["--no-pager", "ls-remote", "--refs", "origin"],
@@ -219,6 +321,7 @@ class GitClient:
         )
 
     async def fetch_refspec(self, refspec: str, *, timeout: float = 120.0) -> None:
+        await self._guard_repo_local_config()
         self._require(
             await self._run(
                 [

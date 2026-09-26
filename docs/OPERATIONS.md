@@ -73,6 +73,7 @@ schema v2 前的存量 plan（无指纹）一律 `STALE_PLAN`，需重新 plan�
 | `DRIFT_DETECTED` | 人工改动与登记基线不一致 | 核实现场后 reconcile |
 | `BUILD_FAILED` | 构建失败 | 看 job 日志（spool 目录） |
 | `BUILD_UNSUPPORTED_FRONTEND` | Dockerfile 含 `# syntax=` 自定义前端指令 | 移除该指令后重新提交（离线目标无法拉取自定义 frontend；不可重试） |
+| `REPO_CONFIG_REJECTED` | 登记仓库的 `.git/config` 含危险键（include/insteadOf/代理等） | 以 `drawbridge` 组内账号清理 `<repo>/.git/config` 后重试；错误信息列出命中键 |
 | `VERIFY_FAILED` | 健康门禁失败 | 自动恢复后检查恢复结果 |
 | `ROLLBACK_FAILED` / `NEEDS_ATTENTION` | 恢复失败 / 现场不明 | **人工核实现场**，见下节 |
 | `MAINTENANCE` | 维护模式 | 结束维护后重试 |

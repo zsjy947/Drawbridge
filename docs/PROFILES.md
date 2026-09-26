@@ -51,9 +51,15 @@ drawbridge-builder$ buildkitd --root ~/.local/share/buildkit \
 - `/etc/drawbridge/empty-hooks`：空 hooks 目录（`core.hooksPath` 指向）；
 - `/etc/drawbridge/gitconfig`：管理员维护的全局 git config；
 - `/etc/drawbridge/ssh-wrapper`：固定 SSH wrapper + 严格 known_hosts；
-- 预克隆仓库的 `.git/config` 属于可信配置：接入时检查 origin URL、禁止
-  额外 URL / insteadOf / include / 代理 / 自定义协议覆盖；业务提交与
-  MCP 请求都不能修改它；
+- 预克隆仓库的 `.git/config` 属于可信配置：**代码强制扫描（plan D5）**——
+  每次 ls-remote / fetch 前做纯文本键扫描（不执行 git 子进程），命中
+  `include`/`includeIf`、`url.<any>.insteadOf|pushInsteadOf`、
+  `core.sshCommand`、`core.hooksPath`、`credential.*`、`http.proxy`/
+  `https.proxy`/`http.extraheader`、`submodule.*.update` 即拒绝
+  （`REPO_CONFIG_REJECTED`，错误信息指出命中键名）；二进制或超过 1 MiB 的
+  config 直接拒绝。接入时的人工核对清单仍然保留（origin URL、额外 remote、
+  自定义协议覆盖等扫描面之外的项），业务提交与 MCP 请求都不能修改它；
 - 所有 Git 命令带统一前缀：`--no-pager`、hooks 关闭、fsmonitor 关闭、
   协议白名单（ssh/https 允许，其余 `protocol.allow=never`）、清空
-  credential helper。
+  credential helper、**`gc.auto=0`**（大仓库 fetch 不允许被 auto-gc 阻塞
+  到 120s 预算之外）。

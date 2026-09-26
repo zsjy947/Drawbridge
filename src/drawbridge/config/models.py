@@ -151,6 +151,8 @@ ARGV_PREFIX_PRESETS: dict[str, tuple[str, ...]] = {
         "protocol.https.allow=always",
         "-c",
         "credential.helper=",
+        "-c",
+        "gc.auto=0",
     ),
 }
 

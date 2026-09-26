@@ -15,6 +15,7 @@ import pytest
 
 from drawbridge.config.models import GitConfig, SourceMode
 from drawbridge.errors import (
+    DrawbridgeError,
     InvalidParameterError,
     UnknownRefError,
     UnreachableRefError,
@@ -317,3 +318,138 @@ class TestOutputParsingSeesFullBudget:
         spec = seen["spec"]
         assert spec.max_output_bytes == REMOTE_OUTPUT_LIMIT
         assert spec.summary_bytes == REMOTE_OUTPUT_LIMIT
+
+
+class TestGitGlobalOptions:
+    async def test_gc_auto_disabled_in_every_argv(
+        self, repos, git_path: str, repo_env: dict[str, str]
+    ) -> None:
+        """D5: fetch on a large repo must never stall in auto-gc."""
+        seen: list[tuple[str, ...]] = []
+
+        class CapturingPM(ProcessManager):
+            async def execute(self, spec):  # type: ignore[no-untyped-def]
+                seen.append(tuple(spec.argv))
+                return await super().execute(spec)
+
+        client = GitClient(
+            git_path=git_path,
+            repo_path=str(repos["clone"]),
+            env=repo_env,
+            process_manager=CapturingPM(),
+        )
+        await client.status_porcelain()
+        await client.enumerate_remote_refs()
+        assert seen, "no git invocations were captured"
+        for argv in seen:
+            assert "gc.auto=0" in argv
+            assert argv[argv.index("gc.auto=0") - 1] == "-c"
+
+
+class TestRepoLocalConfigGuard:
+    """D5: dangerous keys in <repo>/.git/config are rejected before any
+    remote contact — no git subprocess, no network."""
+
+    @staticmethod
+    def _client_with_config(
+        tmp_path: Path, git_path: str, repo_env: dict[str, str], config_text: str
+    ) -> tuple[GitClient, list[tuple[str, ...]]]:
+        # The guard only reads <repo>/.git/config and never runs git (the
+        # recording PM asserts that), so a skeleton directory suffices.
+        repo = tmp_path / "guarded-repo"
+        (repo / ".git").mkdir(parents=True, exist_ok=True)
+        (repo / ".git" / "config").write_text(config_text, encoding="utf-8")
+        executed: list[tuple[str, ...]] = []
+
+        class RecordingPM(ProcessManager):
+            async def execute(self, spec):  # type: ignore[no-untyped-def]
+                executed.append(tuple(spec.argv))
+                raise AssertionError("guard must reject before any git run")
+
+        client = GitClient(
+            git_path=git_path,
+            repo_path=str(repo),
+            env=repo_env,
+            process_manager=RecordingPM(),
+        )
+        return client, executed
+
+    async def test_include_directive_rejected(
+        self, tmp_path: Path, git_path: str, repo_env: dict[str, str]
+    ) -> None:
+        client, executed = self._client_with_config(
+            tmp_path,
+            git_path,
+            repo_env,
+            "[include]\n\tpath = /etc/evil-gitconfig\n",
+        )
+        with pytest.raises(DrawbridgeError) as exc:
+            await client.enumerate_remote_refs()
+        assert exc.value.code == "REPO_CONFIG_REJECTED"
+        assert "include" in str(exc.value)
+        assert executed == []  # no subprocess ever ran
+
+    async def test_insteadof_rejected(
+        self, tmp_path: Path, git_path: str, repo_env: dict[str, str]
+    ) -> None:
+        client, executed = self._client_with_config(
+            tmp_path,
+            git_path,
+            repo_env,
+            '[url "https://evil.example/"]\n\tinsteadOf = https://github.com/\n',
+        )
+        with pytest.raises(DrawbridgeError, match="insteadof"):
+            await client.fetch_refspec("refs/heads/main")
+        assert executed == []
+
+    async def test_binary_config_rejected(
+        self, tmp_path: Path, git_path: str, repo_env: dict[str, str]
+    ) -> None:
+        repo = tmp_path / "binary-repo"
+        (repo / ".git").mkdir(parents=True, exist_ok=True)
+        (repo / ".git" / "config").write_bytes(b"[core]\n\x00\n")
+        executed: list[tuple[str, ...]] = []
+
+        class RecordingPM(ProcessManager):
+            async def execute(self, spec):  # type: ignore[no-untyped-def]
+                executed.append(tuple(spec.argv))
+                raise AssertionError("guard must reject before any git run")
+
+        client = GitClient(
+            git_path=git_path,
+            repo_path=str(repo),
+            env=repo_env,
+            process_manager=RecordingPM(),
+        )
+        with pytest.raises(DrawbridgeError, match="binary"):
+            await client.enumerate_remote_refs()
+        assert executed == []
+
+    async def test_scan_table(self) -> None:
+        from drawbridge.gitops import scan_repo_config_dangerous_keys
+
+        clean = (
+            '[core]\n\trepositoryformatversion = 0\n'
+            '[remote "origin"]\n\turl = /srv/origin/demo.git\n'
+            '[branch "main"]\n\tremote = origin\n'
+        )
+        assert scan_repo_config_dangerous_keys(clean) == []
+        assert scan_repo_config_dangerous_keys(
+            '[includeIf "gitdir:~/"]\n\tpath = ~/evil\n'
+        ) == ["[includeif]"]
+        assert scan_repo_config_dangerous_keys(
+            '[core]\n\tsshCommand = ssh -i /tmp/evil\n'
+        ) == ["core.sshcommand"]
+        assert scan_repo_config_dangerous_keys(
+            "[credential]\n\thelper = store\n"
+        ) == ["credential.helper"]
+        assert scan_repo_config_dangerous_keys(
+            '[submodule "evil"]\n\tupdate = !rm -rf /\n'
+        ) == ["submodule.evil.update"]
+        assert scan_repo_config_dangerous_keys(
+            '[http]\n\textraHeader = Authorization: evil\n'
+        ) == ["http.extraheader"]
+        # benign keys under the same sections stay allowed
+        assert scan_repo_config_dangerous_keys(
+            '[url "https://example.com"]\n\tother = 1\n'
+        ) == []
